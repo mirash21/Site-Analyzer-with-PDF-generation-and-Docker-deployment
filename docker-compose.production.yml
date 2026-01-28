@@ -1,0 +1,101 @@
+# ==========================================
+# PRODUCTION DOCKER COMPOSE CONFIGURATION
+# ==========================================
+# Для развертывания на сервере 185.117.155.237
+# Использует готовые образы из Docker Hub вместо локальной сборки
+# ==========================================
+
+services:
+  # ============================
+  # BACKEND SERVICE
+  # ============================
+  # Имя контейнера: backend-1 (как указано в требованиях)
+  # Образ: mirash2008/backend:latest
+  # ============================
+  backend:
+    # Имя контейнера для идентификации
+    container_name: backend-1
+    
+    # Используем готовый образ из Docker Hub вместо локальной сборки
+    image: mirash2008/backend:latest
+    
+    # Порт: маппим 8000 хоста на 8000 контейнера
+    ports:
+      - "8000:8000"
+    
+    # Переменные окружения из файла .env
+    env_file:
+      - .env
+    
+    # Персистентное хранилище для базы данных
+    volumes:
+      # Директория для базы данных SQLite
+      - ./data:/app/data
+      # Логи приложения
+      - ./logs:/app/logs
+    
+    # Политика перезапуска: всегда перезапускать при сбое
+    restart: unless-stopped
+    
+    # Подключение к общей bridge сети для коммуникации с frontend
+    networks:
+      - app-network
+    
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================
+  # FRONTEND SERVICE
+  # ============================
+  # Имя контейнера: frontend-1 (как указано в требованиях)
+  # Образ: mirash2008/frontend:latest
+  # ============================
+  frontend:
+    # Имя контейнера для идентификации
+    container_name: frontend-1
+    
+    # Используем готовый образ из Docker Hub вместо локальной сборки
+    image: mirash2008/frontend:latest
+    
+    # Порт: маппим 80 хоста на 80 контейнера (nginx)
+    ports:
+      - "80:80"
+    
+    # Режим работы: production (статические файлы через nginx)
+    environment:
+      - NODE_ENV=production
+    
+    # Зависимость от backend
+    depends_on:
+      - backend
+    
+    # Политика перезапуска: всегда перезапускать при сбое
+    restart: unless-stopped
+    
+    # Подключение к общей bridge сети для коммуникации с backend
+    networks:
+      - app-network
+    
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================
+# NETWORKS
+# ============================
+# Общая bridge сеть для коммуникации между контейнерами
+# Backend и frontend могут общаться по именам сервисов (backend, frontend)
+# ============================
+networks:
+  app-network:
+    driver: bridge
+    name: app-network
+    # Используем существующую сеть если есть
+    external: false
