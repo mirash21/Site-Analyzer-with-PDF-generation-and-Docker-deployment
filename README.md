@@ -10,7 +10,7 @@
 
 **Advanced web analytics platform with AI-powered site analysis and PDF report generation**
 
-[Live Demo](http://185.117.155.237) • [Documentation](#features) • [Getting Started](#-installation)
+• [Documentation](#features) • [Getting Started](#-installation)
 
 </div>
 
@@ -249,7 +249,7 @@ Follow the prompts to create your admin user.
 
 ### 2. Access the Application
 
-- **Frontend**: http://localhost:3000 (dev) or http://185.117.155.237 (production)
+- **Frontend**: http://localhost:3000 (dev)
 - **Backend API**: http://localhost:8000
 - **API Documentation**: http://localhost:8000/docs
 
@@ -446,7 +446,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 📞 Support
 
 For support and questions:
-- 📧 Email: mirash@example.com
+- 📧 Email: mirash2008@yandex.ru
 - 🐛 Issues: [GitHub Issues](https://github.com/mirash21/Site-Analyzer-with-PDF-generation-and-Docker-deployment/issues)
 - 📚 Documentation: [Full Guide](#-documentation)
 
