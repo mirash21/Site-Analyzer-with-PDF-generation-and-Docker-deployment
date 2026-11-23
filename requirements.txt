@@ -11,3 +11,4 @@ python-multipart
 sqlalchemy
 aiosqlite
 email-validator
+slowapi

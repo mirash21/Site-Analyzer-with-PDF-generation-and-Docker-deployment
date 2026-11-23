@@ -1,0 +1,63 @@
+# ==========================================
+# Локальное развёртывание Site Analyzer
+# Backend: 8050, Frontend: 8051
+# LLM: OmniRoute (сеть barter-hub_default)
+# ==========================================
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Backend-Dockerfile
+    container_name: site-analyzer-backend
+    # Бэкенд НЕ публикуется наружу: доступ только через фронтенд-nginx
+    # (проксирует /api/ на backend:8000 внутри сети sa-network).
+    # Это защищает API от прямого доступа из интернета.
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - sa-network
+      - barter-hub_default
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: site-analyzer-frontend
+    ports:
+      - "8051:80"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - sa-network
+      # Сеть nginx-proxy-manager для доступа из внешнего прокси
+      - npm-proxy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  sa-network:
+    driver: bridge
+  barter-hub_default:
+    external: true
+  # Внешняя сеть nginx-proxy-manager (для доступа из внешнего прокси)
+  npm-proxy:
+    external: true
+    name: nginx-proxy-manager_proxy_net

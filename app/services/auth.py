@@ -10,9 +10,16 @@ from app.models.models import User
 import os
 
 # Секретный ключ для JWT токенов
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+# Обязательный параметр: при отсутствии приложение не должно запускаться
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "Переменная окружения SECRET_KEY не задана. "
+        "Сгенерируйте её командой: python3 -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    )
+
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")

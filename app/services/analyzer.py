@@ -1,7 +1,20 @@
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict
 from app.services.llm_client import LLMClient
+
+
+class SSRFError(Exception):
+    """Исключение при попытке SSRF-атаки (доступ к внутренним адресам)."""
+
+
+# Максимальная длина текста сайта, отправляемого в LLM (в символах).
+# Ограничивает стоимость и время анализа больших страниц.
+MAX_SITE_TEXT_LENGTH = 12000
 
 
 class SiteAnalyzer:
@@ -13,6 +26,53 @@ class SiteAnalyzer:
             llm_client: Клиент для работы с LLM
         """
         self.llm_client = llm_client
+
+    @staticmethod
+    def _validate_url(url: str) -> str:
+        """
+        Валидация URL и защита от SSRF.
+
+        Проверяет, что URL использует http/https, и что резолвится в публичный IP
+        (не private/loopback/link-local/reserved).
+
+        Args:
+            url: URL для проверки
+
+        Returns:
+            Нормализованный URL
+
+        Raises:
+            SSRFError: Если URL небезопасен
+        """
+        parsed = urlparse(url)
+
+        if parsed.scheme not in ("http", "https"):
+            raise SSRFError("Допускаются только http/https URL")
+
+        if not parsed.hostname:
+            raise SSRFError("Некорректный URL: отсутствует хост")
+
+        # Блокируем URL с учётными данными (user:pass@host)
+        if parsed.username or parsed.password:
+            raise SSRFError("URL не должен содержать учётные данные")
+
+        # Резолвим hostname в IP-адреса
+        try:
+            infos = socket.getaddrinfo(parsed.hostname, None)
+        except socket.gaierror:
+            raise SSRFError(f"Не удалось разрешить хост: {parsed.hostname}")
+
+        for info in infos:
+            ip_str = info[4][0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+            except ValueError:
+                continue
+
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise SSRFError(f"Доступ к внутреннему адресу запрещён: {ip_str}")
+
+        return url
 
     def fetch_site_html(self, url: str) -> str:
         """
@@ -28,14 +88,39 @@ class SiteAnalyzer:
             Exception: Если не удалось скачать страницу
         """
         try:
+            # SSRF-защита: валидация URL перед запросом
+            url = self._validate_url(url)
+
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=10,
+                allow_redirects=True,
+                # Не разрешаем редиректы на внутренние адреса
+                hooks={'response': self._check_redirect_target}
+            )
             response.raise_for_status()
             return response.text
+        except SSRFError as e:
+            raise Exception(str(e))
         except Exception as e:
             raise Exception(f"Не удалось скачать страницу: {str(e)}")
+
+    @staticmethod
+    def _check_redirect_target(response, *args, **kwargs):
+        """
+        Проверка каждого редиректа на SSRF-безопасность.
+
+        Вызывается requests для каждого ответа (включая промежуточные редиректы).
+        """
+        if response.is_redirect or response.is_permanent_redirect:
+            location = response.headers.get("Location")
+            if location:
+                SiteAnalyzer._validate_url(location)
+        return response
 
     def clean_html(self, html: str) -> str:
         """
@@ -181,6 +266,10 @@ class SiteAnalyzer:
         
         if not site_text or len(site_text) < 100:
             raise Exception("Не удалось получить достаточное количество текста с сайта")
+        
+        # Ограничиваем длину текста, чтобы не перегружать LLM
+        if len(site_text) > MAX_SITE_TEXT_LENGTH:
+            site_text = site_text[:MAX_SITE_TEXT_LENGTH]
         
         # Шаг 3: Генерируем список шагов для анализа
         steps = self.generate_analysis_steps(site_text)
