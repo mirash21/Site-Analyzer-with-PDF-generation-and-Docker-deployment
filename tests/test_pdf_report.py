@@ -14,6 +14,7 @@ from app.services import pdf_report
 from app.services.pdf_report import (
     PDFRenderError,
     build_analysis_pdf,
+    format_created_at,
     inline_markup,
     markdown_flowables,
     pdf_filename,
@@ -124,6 +125,13 @@ def test_missing_cyrillic_font_is_reported_plainly(monkeypatch):
     with pytest.raises(PDFRenderError) as excinfo:
         build_analysis_pdf({"url": "https://example.com"})
     assert "fonts-dejavu-core" in str(excinfo.value)
+
+
+def test_report_date_is_human_readable():
+    assert format_created_at("2026-11-23T17:19:12.064392") == "23.11.2026 17:19"
+    assert format_created_at("2026-11-23 19:47:38") == "23.11.2026 19:47"
+    assert format_created_at("не дата") == "не дата"
+    assert format_created_at(None) == ""
 
 
 def test_filename_is_ascii_safe():

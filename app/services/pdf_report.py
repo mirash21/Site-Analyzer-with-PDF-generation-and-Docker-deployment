@@ -9,6 +9,7 @@
 
 import io
 import re
+from datetime import datetime
 from typing import Any, List, Sequence
 from xml.sax.saxutils import escape
 
@@ -407,6 +408,19 @@ def _numbered_canvas(note: str):
     return NumberedCanvas
 
 
+def format_created_at(raw) -> str:
+    """Дата отчёта человеку: 23.11.2026 17:19 вместо ISO с буквой T."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("T", " ").replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return text
+    return parsed.strftime("%d.%m.%Y %H:%M")
+
+
 def build_analysis_pdf(analysis: dict) -> bytes:
     """Собирает PDF по записи анализа.
 
@@ -440,7 +454,9 @@ def build_analysis_pdf(analysis: dict) -> bytes:
         Paragraph(inline_markup(url), styles["subtitle"]),
     ]
     if analysis.get("created_at"):
-        story.append(Paragraph(f"Дата анализа: {inline_markup(analysis['created_at'])}", styles["subtitle"]))
+        created = format_created_at(analysis["created_at"])
+        if created:
+            story.append(Paragraph(f"Дата анализа: {inline_markup(created)}", styles["subtitle"]))
     story.append(Spacer(1, 8))
 
     final_analysis = analysis.get("final_analysis") or {}
