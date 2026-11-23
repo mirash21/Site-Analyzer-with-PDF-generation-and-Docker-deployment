@@ -1,7 +1,10 @@
 import { motion } from 'framer-motion'
-import RichText from './RichText'
+import RichText, { KeywordList } from './RichText'
 import { labelFor, formatDate } from '../utils/labels'
 import { downloadAnalysisPDF } from '../utils/pdfDownload'
+
+// Список фраз — не текст: его копируют в рекламный кабинет целиком.
+const KEYWORD_KEYS = ['keyword_seeds', 'negative_keywords']
 
 // Итоговый анализ: ключи JSON-схемы превращаются в разделы отчёта.
 // Значение может быть строкой с markdown, списком строк, списком объектов или
@@ -87,7 +90,9 @@ function ResultCard({ data, delay = 0, url = '', fullAnalysisData = null, analys
               <h3 className="text-xl font-bold mb-3 text-blue-300">
                 {labelFor(key)}
               </h3>
-              <RichText>{value}</RichText>
+              {KEYWORD_KEYS.includes(key) && Array.isArray(value)
+                ? <KeywordList items={value} />
+                : <RichText>{value}</RichText>}
             </div>
           </motion.div>
         )

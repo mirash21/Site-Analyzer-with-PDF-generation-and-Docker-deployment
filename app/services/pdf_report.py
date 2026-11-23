@@ -367,6 +367,20 @@ def value_flowables(value: Any, styles: dict, depth: int = 0) -> List[Any]:
     return [Paragraph(inline_markup(value), styles["body"])]
 
 
+# Семантику и минус-слова переносят в медиаплан блоком фраз, а не столбиком
+# из сорока строк: в PDF тот же блок должен оставаться компактным.
+KEYWORD_LIST_KEYS = {"keyword_seeds", "negative_keywords"}
+
+
+def _is_keyword_list(key: Any, value: Any) -> bool:
+    return str(key or "").strip().lower() in KEYWORD_LIST_KEYS and isinstance(value, list) and bool(value)
+
+
+def keyword_list_flowable(items: List[Any], styles: dict):
+    phrases = [str(item).strip() for item in items if str(item or "").strip()]
+    return Paragraph(inline_markup(" · ".join(phrases)) if phrases else "пусто", styles["body"])
+
+
 def object_flowables(value: dict, styles: dict, depth: int = 0) -> List[Any]:
     """Один элемент списка (объявление, сегмент) — заголовок + поля."""
     title_key = next(
@@ -489,6 +503,9 @@ def build_analysis_pdf(analysis: dict) -> bytes:
     if isinstance(final_analysis, dict) and final_analysis:
         for key, value in final_analysis.items():
             story.append(Paragraph(_label(key), styles["h2"]))
+            if _is_keyword_list(key, value):
+                story.append(keyword_list_flowable(value, styles))
+                continue
             story.extend(value_flowables(value, styles))
     elif final_analysis:
         story.extend(value_flowables(final_analysis, styles))

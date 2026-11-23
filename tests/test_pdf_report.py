@@ -74,6 +74,20 @@ def test_long_report_is_paginated():
     assert pages >= 2
 
 
+def test_keyword_lists_are_a_compact_block_not_a_column_of_bullets():
+    analysis = sample_analysis()
+    analysis["final_analysis"]["keyword_seeds"] = ["резец проходной", "калибр INSIZE", "метчик м6"]
+    analysis["final_analysis"]["negative_keywords"] = ["скачать", "бесплатно"]
+
+    assert build_analysis_pdf(analysis).startswith(b"%PDF-")
+    block = pdf_report.keyword_list_flowable(analysis["final_analysis"]["keyword_seeds"], styles())
+    assert block.text == "резец проходной · калибр INSIZE · метчик м6"
+    # Обычные списки отчёта остаются пунктуальными: compact — только про фразы.
+    assert pdf_report._is_keyword_list("keyword_seeds", ["резец"])
+    assert not pdf_report._is_keyword_list("site_gaps", ["нет цен"])
+    assert not pdf_report._is_keyword_list("keyword_seeds", [])
+
+
 def test_markdown_table_becomes_a_table_block():
     blocks = markdown_flowables(
         "| Сегмент | Потребность |\n| --- | --- |\n| Технологи | подбор по чертежу |",

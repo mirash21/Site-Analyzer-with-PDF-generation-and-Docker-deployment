@@ -473,7 +473,9 @@ def test_final_prompt_requires_a_table_and_stops_quoting_source(analyzer):
     _, system_prompt, user_prompt = analyzer.llm_client.calls[-1]
 
     assert '"comparison_table"' in system_prompt
-    assert '"ad_examples"' in system_prompt
+    # Объявления уехали в отдельный запрос: вместе с планом модель обрезалась
+    # на середине ответа, и отчёт приходил наполовину пустой.
+    assert '"ad_examples"' not in system_prompt
     assert "Обязательно включи в анализ оригинальный текст сайта" not in system_prompt
     assert "Не вставляй в ответ оригинальный текст сайта целиком" in system_prompt
     # Промежуточный ответ тоже ограничивается: иначе итоговый промпт разрастается.
@@ -508,6 +510,98 @@ def test_normalization_rejects_non_object_answer(analyzer):
     assert "JSON-объекта" in str(excinfo.value)
 
 
+def test_campaign_plan_prompt_asks_for_semantics_and_negatives(analyzer):
+    facts = {
+        "phones": ["+7 (843) 200-11-22"],
+        "emails": [],
+        "legal_entities": [],
+        "requisites": [],
+        "prices": [],
+    }
+    analyzer.generate_campaign_plan(
+        [{"step_number": 1, "step": "шаг", "result": "ответ"}], "текст сайта", facts
+    )
+    _, system_prompt, _ = analyzer.llm_client.calls[-1]
+
+    assert '"keyword_seeds"' in system_prompt
+    assert '"negative_keywords"' in system_prompt
+    assert "минус-слова" in system_prompt
+    # Объявления пишутся про реальные товары, поэтому дословные данные сайта —
+    # и в этом запросе тоже.
+    assert "+7 (843) 200-11-22" in system_prompt
+    assert len(system_prompt) < 6000
+
+
+def test_semantic_list_is_capped(analyzer):
+    plan = analyzer._normalize_campaign_plan(
+        {"keyword_seeds": [f"купить товар {index}" for index in range(80)], "negative_keywords": ["скачать"]}
+    )
+
+    assert len(plan["keyword_seeds"]) == analyzer_module.MAX_KEYWORDS_PER_LIST
+    assert plan["keyword_seeds"][0] == "купить товар 0"
+
+
+def test_a_phrase_cannot_be_a_keyword_and_a_negative(analyzer):
+    plan = analyzer._normalize_campaign_plan(
+        {
+            "keyword_seeds": ["купить резец", "Резец проходной", "метчик м6"],
+            "negative_keywords": ["резец ПРОХОДНОЙ", "скачать"],
+        }
+    )
+
+    # Пересечение обнулило бы показы: решение за исключением — оно безопаснее
+    # для бюджета.
+    assert plan["keyword_seeds"] == ["купить резец", "метчик м6"]
+    assert plan["negative_keywords"] == ["резец ПРОХОДНОЙ", "скачать"]
+
+
+def test_campaign_plan_keeps_only_plan_fields(analyzer):
+    plan = analyzer._normalize_campaign_plan(
+        {
+            "ad_instructions": ["собрать семантику", "настроить кампанию"],
+            "keyword_seeds": ["резец проходной"],
+            "negative_keywords": [],
+            "brief_analysis": "модель заодно вернула разбор сайта",
+            "key_facts": [{"fact": "Работаем с 2007 года", "source": 1}],
+        }
+    )
+
+    assert plan["ad_instructions"] == "1. собрать семантику\n2. настроить кампанию"
+    assert plan["keyword_seeds"] == ["резец проходной"]
+    assert "negative_keywords" not in plan, "пустой список — это не раздел отчёта"
+    # key_facts из ответа плана — сырой номер источника, а не ссылка: подмешать
+    # их к готовому разбору значит лишить факты проверяемого адреса.
+    assert "brief_analysis" not in plan and "key_facts" not in plan
+
+
+def test_failed_campaign_plan_does_not_lose_the_report(analyzer, monkeypatch):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [1200]}
+    monkeypatch.setattr(
+        analyzer, "collect_site_evidence", lambda url: ("структурированный текст сайта " * 10, sources, facts)
+    )
+    monkeypatch.setattr(analyzer, "generate_analysis_steps", lambda text: ["Выделить сегменты"])
+
+    def broken_plan(*args, **kwargs):
+        raise Exception("429 от шлюза")
+
+    monkeypatch.setattr(analyzer, "generate_campaign_plan", broken_plan)
+    analyzer.llm_client.answers = {
+        "chat_json": {
+            "steps": ["Выделить сегменты"],
+            "brief_analysis": "разбор",
+            # Модель вернула поля плана в первом же ответе — они не нормализованы.
+            "keyword_seeds": ["купить резец", {"странная": "форма"}],
+        }
+    }
+
+    result = analyzer.analyze_site("https://tateng.ru/")
+
+    assert result["final_analysis"]["brief_analysis"] == "разбор"
+    assert "keyword_seeds" not in result["final_analysis"]
+    assert any("Семантика" in gap for gap in result["final_analysis"]["data_gaps"])
+
+
 def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
     facts = {"phones": ["+7 843 200 11 22"], "emails": [], "legal_entities": [], "requisites": [], "prices": [1200]}
@@ -520,8 +614,11 @@ def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
         "chat_json": {
             "steps": ["Выделить сегменты"],
             "brief_analysis": "разбор",
+            "ad_instructions": ["собрать семантику"],
             "key_facts": [{"fact": "Работаем с 2007 года", "source": 1}],
             "comparison_table": {"columns": ["Сегмент"], "rows": [["Технологи"]]},
+            "keyword_seeds": ["купить резец", "резец проходной", "скачать"],
+            "negative_keywords": ["скачать", "бесплатно"],
         },
         "chat_with_system": "- короткий ответ",
     }
@@ -537,3 +634,8 @@ def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     assert result["final_analysis"]["key_facts"][0]["source"] == "https://tateng.ru/"
     assert "+7 843 200 11 22" in result["final_analysis"]["raw_site_data"]
     assert "Прочитано страниц: 1" in result["final_analysis"]["data_coverage"]
+    # План кампании — второй запрос, и он не затирает разбор сайта.
+    assert result["final_analysis"]["keyword_seeds"] == ["купить резец", "резец проходной"]
+    assert result["final_analysis"]["negative_keywords"] == ["скачать", "бесплатно"]
+    keys = list(result["final_analysis"])
+    assert keys.index("ad_instructions") < keys.index("keyword_seeds") < keys.index("negative_keywords")

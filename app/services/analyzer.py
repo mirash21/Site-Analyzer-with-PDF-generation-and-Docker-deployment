@@ -49,6 +49,15 @@ SITE_FETCH_TIMEOUT = 15
 MIN_EXTRA_PAGE_CHARS = 200
 FACTS_BLOCK_ROOM = 1200
 
+# Список семантики короче, чем фантазия модели: 60 фраз «купить инструмент»
+# на одну страницу никто не проверяет, а платят за показ каждой.
+MAX_KEYWORDS_PER_LIST = 25
+
+# План кампании — отдельный ответ модели. В отчёт берутся только эти поля:
+# модель часто возвращает вместе с планом поля разбора сайта, и там номер
+# источника — число, а не ссылка; подмешивать такое к готовому нельзя.
+CAMPAIGN_PLAN_KEYS = ("ad_instructions", "ad_examples", "keyword_seeds", "negative_keywords")
+
 # Модель ссылается на страницы только номерами: адрес она обязана взять из
 # реестра, а не сочинять. Не распознанный номер факт не теряет, но помечается.
 SOURCE_REFERENCE_UNRESOLVED = "источник не распознан"
@@ -728,8 +737,6 @@ class SiteAnalyzer:
             "{\n"
             '  "brief_analysis": "краткий анализ сайта: кто продаёт, кому, чем цепляет; до 1500 знаков, markdown-список",\n'
             '  "key_facts": [ {"fact": "короткий проверяемый факт со страницы", "source": N}, ... 5-8 фактов, где N — номер из заголовка «Источник N» ],\n'
-            '  "ad_instructions": "пошаговая инструкция по созданию рекламных постов; до 1500 знаков, нумерованный список",\n'
-            '  "ad_examples": [ {"title": "заголовок", "body": "текст объявления", "cta": "призыв к действию"}, ... ровно 3 примера ],\n'
             '  "comparison_table": {"columns": ["Сегмент", "Боль", "УТП", "Канал"], "rows": [["...", "...", "...", "..."], ... 4-6 строк]},\n'
             '  "site_gaps": ["что на сайте мешает конверсии — 3-6 пунктов, только то, что видно на прочитанных страницах"],\n'
             '  "risks_and_checks": ["что проверить перед запуском: дилерские права, товарные знаки брендов, актуальность сертификатов, сроки поставки — 3-6 пунктов"],\n'
@@ -746,6 +753,45 @@ class SiteAnalyzer:
         response = self.llm_client.chat_json(system_prompt, user_prompt)
 
         return self._normalize_final_analysis(response, sources, facts)
+
+    def generate_campaign_plan(
+        self,
+        intermediate_results: List[Dict[str, str]],
+        site_text: str,
+        facts: Dict | None = None,
+    ) -> Dict:
+        """План кампании: инструкция, семантика и минус-слова — отдельным запросом.
+
+        В один JSON модель начала обрезаться на середине, а половина отчёта
+        хуже двух целых: здесь у каждого ответа свой умеренный бюджет токенов.
+        """
+        results_str = "\n\n".join(
+            f"Шаг {r['step_number']}: {r['step']}\nРезультат: {self._fit(r['result'], 1600)}"
+            for r in intermediate_results
+        )
+        literal = self.render_business_facts(facts) if facts else ""
+
+        system_prompt = (
+            "Ты рекламный специалист. По результатам анализа сайта собери план кампании. "
+            "Фразы должны браться из товаров и услуг этого сайта, а не из общих слов о рекламе.\n\n"
+            f"Результаты анализа:\n{results_str}\n\n"
+            + (f"{literal}\n\n" if literal else "")
+            + "Ответ строго в JSON со всеми полями:\n"
+            "{\n"
+            '  "ad_instructions": "пошаговая инструкция по запуску кампании; до 1500 знаков, нумерованный список",\n'
+            '  "ad_examples": [ {"segment": "сегмент", "title": "заголовок", "body": "текст объявления", "cta": "призыв"}, ... 3-5 объявлений ],\n'
+            '  "keyword_seeds": ["поисковые фразы из 2-5 слов, соответствующие товарам и услугам сайта — 12-20 штук"],\n'
+            '  "negative_keywords": ["минус-слова, отсекающие нецелевые показы — 10-20 штук"],\n'
+            "}\n"
+            "Фразы пиши без кавычек, операторов и переносов строк, в начальной форме. "
+            "Одна фраза не может быть одновременно в семантике и в минус-листах."
+        )
+
+        user_prompt = f"Контекст о сайте (фрагменты текста):\n{self._fit(site_text, 3000)}"
+
+        response = self.llm_client.chat_json(system_prompt, user_prompt)
+
+        return self._normalize_campaign_plan(response)
 
     @staticmethod
     def _markdown_table_to_grid(text: str) -> Dict:
@@ -922,6 +968,73 @@ class SiteAnalyzer:
         return ordered
 
     @classmethod
+    def _normalize_ad_examples(cls, value) -> List[Dict]:
+        """Объявления в форму, которую рисуют интерфейс и PDF."""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return []
+
+        normalized: List[Dict] = []
+        for item in value:
+            if isinstance(item, dict):
+                entry = {str(key): str(val) for key, val in item.items()}
+                if any(entry.values()):
+                    normalized.append(entry)
+            elif isinstance(item, str) and item.strip():
+                lines = [line.strip() for line in item.splitlines() if line.strip()]
+                normalized.append(
+                    {"title": lines[0], "body": "\n".join(lines[1:])} if len(lines) > 1 else {"body": item.strip()}
+                )
+        return normalized
+
+    @classmethod
+    def _normalize_keywords(cls, result: Dict) -> None:
+        """Семантика и минус-слова: списки ограничены, пересечение снято.
+
+        Одна и та же фраза в семантике и в минус-листе обнуляет показы: решение
+        за исключением — оно безопаснее для бюджета.
+        """
+        seeds = cls._normalize_string_list(result.get("keyword_seeds"))[:MAX_KEYWORDS_PER_LIST]
+        negatives = cls._normalize_string_list(result.get("negative_keywords"))[:MAX_KEYWORDS_PER_LIST]
+
+        excluded = {item.lower() for item in negatives}
+        seeds = [item for item in seeds if item.lower() not in excluded]
+
+        for key, values in (("keyword_seeds", seeds), ("negative_keywords", negatives)):
+            if values:
+                result[key] = values
+            else:
+                result.pop(key, None)
+
+    @classmethod
+    def _normalize_campaign_plan(cls, response: Dict) -> Dict:
+        """План кампании: те же правила формы, что и для остального отчёта."""
+        if not isinstance(response, dict):
+            raise Exception("LLM не вернула план кампании в формате JSON-объекта")
+
+        result = {key: response[key] for key in CAMPAIGN_PLAN_KEYS if key in response}
+
+        instructions = cls._normalize_string_list(result.get("ad_instructions"))
+        if instructions:
+            result["ad_instructions"] = "\n".join(
+                f"{index}. {item}" for index, item in enumerate(instructions, start=1)
+            )
+        elif isinstance(result.get("ad_instructions"), str):
+            result["ad_instructions"] = result["ad_instructions"].strip()
+        else:
+            result.pop("ad_instructions", None)
+
+        examples = cls._normalize_ad_examples(result.get("ad_examples"))
+        if examples:
+            result["ad_examples"] = examples
+        else:
+            result.pop("ad_examples", None)
+
+        cls._normalize_keywords(result)
+        return result
+
+    @classmethod
     def _normalize_final_analysis(cls, response: Dict, sources=None, facts=None) -> Dict:
         """Приводит ответ модели к форме, которую рисуют интерфейс и PDF.
 
@@ -940,22 +1053,14 @@ class SiteAnalyzer:
             elif value is not None and not isinstance(value, str):
                 result[key] = str(value)
 
-        examples = result.get("ad_examples")
-        if examples is None and isinstance(result.get("examples"), list):
-            examples = result.pop("examples")
-        if isinstance(examples, list):
-            normalized = []
-            for item in examples:
-                if isinstance(item, dict):
-                    entry = {str(key): str(value) for key, value in item.items()}
-                    if any(entry.values()):
-                        normalized.append(entry)
-                elif isinstance(item, str) and item.strip():
-                    lines = [line.strip() for line in item.splitlines() if line.strip()]
-                    normalized.append(
-                        {"title": lines[0], "body": "\n".join(lines[1:])} if len(lines) > 1 else {"body": item.strip()}
-                    )
-            result["ad_examples"] = normalized
+        examples = cls._normalize_ad_examples(
+            result.get("ad_examples") if result.get("ad_examples") is not None else result.get("examples")
+        )
+        if examples:
+            result["ad_examples"] = examples
+        else:
+            result.pop("ad_examples", None)
+            result.pop("examples", None)
 
         table = cls._normalize_table(result.get("comparison_table"))
         if table:
@@ -1032,6 +1137,23 @@ class SiteAnalyzer:
         
         # Шаг 5: Генерируем финальный анализ
         final_analysis = self.generate_final_analysis(intermediate_results, site_text, sources, facts)
+
+        # Шаг 6: план кампании вторым запросом. В один JSON модель обрезалась
+        # на середине, а половина отчёта хуже двух целых ответов.
+        try:
+            campaign_plan = self.generate_campaign_plan(intermediate_results, site_text, facts)
+            final_analysis = self._order_sections({**final_analysis, **campaign_plan})
+        except Exception as exc:  # noqa: BLE001 - без плана отчёт всё равно полезен
+            # План не должен обнулять разбор сайта, но и молчать нельзя:
+            # читатель видит, что семантику собрали не мы.
+            for key in ("keyword_seeds", "negative_keywords", "ad_examples"):
+                # Эти поля принадлежат плану. Если модель вернула их же в первом
+                # ответе, они не нормализованы и в отчёте выглядят как мусор.
+                final_analysis.pop(key, None)
+            final_analysis.setdefault("data_gaps", []).append(
+                "Семантика и минус-слова не сгенерированы — их придётся подбирать вручную."
+            )
+            print(f"План кампании не собран: {exc}")
         
         # Формируем итоговый результат
         return {

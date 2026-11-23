@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { labelFor } from '../utils/labels'
@@ -234,6 +235,46 @@ export default function RichText({ children, className = '' }) {
       <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
         {text}
       </Markdown>
+    </div>
+  )
+}
+
+// Семантику и минус-слова переносят в рекламный кабинет списком: фразы
+// копируют целиком, а не переписывают по одной. Чипы — ещё и потому, что
+// список из 25 фраз пунктами занимает экран, где полезнее разбор сайта.
+export function KeywordList({ items }) {
+  const [copied, setCopied] = useState(false)
+  const phrases = (items || []).map((item) => String(item).trim()).filter(Boolean)
+  if (!phrases.length) return <span className="report-empty">пусто</span>
+
+  const copy = async () => {
+    const text = phrases.join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch (error) {
+      // Clipboard API живёт только в защищённом контексте — на HTTP остаётся
+      // временное поле и устаревшая команда копирования.
+      const area = document.createElement('textarea')
+      area.value = text
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      area.remove()
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  return (
+    <div className="report-keywords">
+      <div className="report-keyword-chips">
+        {phrases.map((phrase, index) => (
+          <span className="report-keyword" key={`${phrase}-${index}`}>{phrase}</span>
+        ))}
+      </div>
+      <button type="button" className="report-copy no-print" onClick={copy}>
+        {copied ? 'Скопировано' : 'Копировать список'}
+      </button>
     </div>
   )
 }

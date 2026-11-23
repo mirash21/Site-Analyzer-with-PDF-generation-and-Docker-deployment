@@ -160,6 +160,37 @@ body {
   margin: 0;
 }
 
+/* Семантика и минус-слова: чипы вместо пунктового списка на пол-экрана. */
+.report-keywords {
+  display: grid;
+  gap: 0.7em;
+  justify-items: start;
+}
+.report-keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em;
+}
+.report-keyword {
+  padding: 0.25em 0.7em;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(99, 102, 241, 0.16);
+  font-size: 0.86em;
+  white-space: nowrap;
+}
+.report-copy {
+  padding: 0.35em 0.9em;
+  border-radius: 0.6em;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.82em;
+  cursor: pointer;
+}
+.report-copy:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 /* ============================================================
    Печать / «Сохранить как PDF» вместо скриншота canvas.
    Canvas-подход резал строки по середине страницы, терял хвост
