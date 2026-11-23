@@ -1,0 +1,34 @@
+# Секреты и рабочее состояние не должны попадать в образ: .env передаётся
+# через env_file, а база и логи — через volumes при запуске. До этого шага
+# образ содержал копию .env с ключом LLM и SECRET_KEY, а также .git.
+.env
+.env.*
+*.env
+.env.local
+
+data/
+logs/
+deploy-logs/
+
+.git/
+.gitignore
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+
+# Фронтенд собирается отдельным образом.
+frontend/
+node_modules/
+
+# Сборочные и служебные файлы хоста.
+docker-compose*.yml
+build-and-push.*
+deploy.*
+*.md
+
+# Тесты остаются на хосте: в образе они ничего не проверяют.
+tests/
+mutation_check.py

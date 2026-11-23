@@ -2,9 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Шрифт с кириллицей нужен серверной сборке PDF (reportlab): без него
+# отчёт выходит или кракозябрами, или с потерянными символами.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# --reload — режим разработки: второй процесс, лишняя нагрузка и перезапуск
+# сервиса на каждое изменение файлов. В проде код меняется только пересборкой
+# образа, поэтому флаг убран намеренно.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
