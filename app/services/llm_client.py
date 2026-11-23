@@ -26,9 +26,28 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 # усиливают аварию вместо того, чтобы её показать.
 TRANSPORT_RETRIES = 1
 
+# Модели с «размышлениями» тратят бюджет токенов на скрытый черновик: при
+# маленьком max_tokens ответ либо приходит пустым, либо обрывается на середине
+# JSON. Поэтому при обрезке лимит удваиваем и повторяем — но не выше потолка.
+TRUNCATION_TOKEN_MULTIPLIER = 2
+DEFAULT_MAX_TOKENS_CEILING = 16000
+
 
 class LLMUnavailableError(Exception):
     """LLM-сервис не ответил ни разу (сетевой сбой или обрыв соединения)."""
+
+
+class LLMTruncatedError(Exception):
+    """Ответ упёрся в лимит токенов и потому неполон."""
+
+    def __init__(self, text: str, limit: int = None):
+        self.text = text or ""
+        self.limit = limit
+        reached = f" на лимите {limit} токенов" if limit is not None else ""
+        super().__init__(
+            f"LLM оборвал ответ{reached}: дошло только {len(self.text)} символов. "
+            "Нужен больший лимит токенов или более короткий запрос."
+        )
 
 
 class LLMClient:
@@ -50,6 +69,9 @@ class LLMClient:
         if self.max_tokens is not None:
             self.max_tokens = int(self.max_tokens)
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+        self.max_tokens_ceiling = int(
+            os.getenv("LLM_MAX_TOKENS_CEILING", DEFAULT_MAX_TOKENS_CEILING)
+        )
         # max_retries=0 отключает собственные повторы SDK: иначе они
         # перемножаются с нашими и добивают уже падающий прокси.
         self.client = OpenAI(
@@ -67,44 +89,78 @@ class LLMClient:
         """Установить максимальное количество токенов."""
         self.max_tokens = max_tokens
 
-    def _request_kwargs(self) -> dict:
+    def _request_kwargs(self, max_tokens: int = None) -> dict:
         """
         Дополнительные параметры запроса к LLM.
 
         Возвращает словарь с параметрами, которые передаются в
         chat.completions.create. Сейчас это max_tokens (если задан).
 
+        Args:
+            max_tokens: лимит токенов для этого запроса; по умолчанию — общий
+
         Returns:
             Словарь с параметрами запроса
         """
         kwargs = {}
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
+        limit = self.max_tokens if max_tokens is None else max_tokens
+        if limit is not None:
+            kwargs["max_tokens"] = limit
         return kwargs
 
     @staticmethod
-    def _extract_content(response) -> str:
+    def _read_answer(response) -> tuple:
         """
-        Извлекает текстовый контент из ответа LLM.
+        Читает ответ как пару (текст, причина остановки).
+
+        finish_reason нужен, чтобы отличить «модель закончила мысль» от
+        «модель упёрлась в лимит токенов» — второе нельзя принять за ответ.
 
         Args:
             response: Ответ OpenAI API
 
         Returns:
-            Текст ответа модели
+            Текст ответа и причина остановки (может отсутствовать)
 
         Raises:
-            ValueError: Если контент пустой или отсутствует
+            ValueError: Если ответ имеет неожиданную структуру
         """
         try:
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
         except (AttributeError, IndexError, KeyError):
             raise ValueError("LLM не вернул контент в ожидаемом формате")
 
-        if not content or not str(content).strip():
-            raise ValueError("LLM вернул пустой ответ")
+        return str(content).strip(), finish_reason
 
-        return str(content).strip()
+    def _answer_text(self, response, max_tokens: int = None) -> str:
+        """
+        Текстовый ответ модели либо ошибка, если он непригоден.
+
+        Args:
+            response: Ответ OpenAI API
+            max_tokens: лимит, с которым ушёл запрос (для текста ошибки)
+
+        Returns:
+            Непрерванный текст ответа модели
+
+        Raises:
+            LLMTruncatedError: ответ обрезан лимитом токенов
+            ValueError: контент пустой или отсутствует
+        """
+        content, finish_reason = self._read_answer(response)
+        if finish_reason == "length":
+            raise LLMTruncatedError(content, self._limit_or_none(max_tokens))
+        if not content:
+            raise ValueError("LLM вернул пустой ответ")
+        return content
+
+    def _limit_or_none(self, max_tokens: int = None):
+        """Лимит токенов запроса: свой, общий или потолок, если лимита не было."""
+        if max_tokens is not None:
+            return max_tokens
+        return self.max_tokens
 
     @staticmethod
     def _is_transport_error(exc: BaseException) -> bool:
@@ -157,13 +213,32 @@ class LLMClient:
             f"Исходная ошибка: {exc}"
         )
 
+    def _next_budget(self, budget: int = None):
+        """
+        Лимит токенов для повтора после обрезки ответа.
+
+        Args:
+            budget: лимит неудачной попытки
+
+        Returns:
+            Новый лимит либо None, если расти некуда
+        """
+        if budget is None or budget >= self.max_tokens_ceiling:
+            return None
+        escalated = min(self.max_tokens_ceiling, budget * TRUNCATION_TOKEN_MULTIPLIER)
+        # Защита от бесконечного цикла при неудачной настройке потолка.
+        if escalated <= budget:
+            return None
+        return escalated
+
     def _call(self, kind: str, request, max_retries: int = 2):
         """
-        Выполняет запрос к LLM, разделяя сетевые сбои и непригодные ответы модели.
+        Выполняет запрос к LLM, разделяя сетевые сбои, обрезку ответа и
+        непригодные ответы модели.
 
         Args:
             kind: описание ожидаемого ответа для текста ошибки
-            request: функция одного запроса, возвращающая готовый результат
+            request: функция одного запроса, принимающая лимит токенов
             max_retries: повторы при непригодном ответе модели
 
         Returns:
@@ -175,9 +250,18 @@ class LLMClient:
         """
         transport_left = TRANSPORT_RETRIES
         model_left = max_retries
+        budget = self.max_tokens
         while True:
             try:
-                return request()
+                return request(budget)
+            except LLMTruncatedError as exc:
+                # С тем же лимитом повтор даст тот же оборванный текст,
+                # поэтому сначала поднимаем бюджет и только потом сдаёмся.
+                next_budget = self._next_budget(budget)
+                if next_budget is None:
+                    raise self._failure(exc, kind) from exc
+                budget = next_budget
+                time.sleep(2)
             except Exception as exc:
                 if self._is_transport_error(exc):
                     if transport_left <= 0:
@@ -200,15 +284,15 @@ class LLMClient:
         Returns:
             Текст ответа модели
         """
-        def request() -> str:
+        def request(max_tokens: int = None) -> str:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "user", "content": prompt}
                 ],
-                **self._request_kwargs()
+                **self._request_kwargs(max_tokens)
             )
-            return self._extract_content(response)
+            return self._answer_text(response, max_tokens)
 
         return self._call("ответ", request, max_retries)
 
@@ -224,16 +308,16 @@ class LLMClient:
         Returns:
             Текст ответа модели
         """
-        def request() -> str:
+        def request(max_tokens: int = None) -> str:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                **self._request_kwargs()
+                **self._request_kwargs(max_tokens)
             )
-            return self._extract_content(response)
+            return self._answer_text(response, max_tokens)
 
         return self._call("ответ", request, max_retries)
 
@@ -291,7 +375,7 @@ class LLMClient:
         Returns:
             Словарь с парсированным JSON-ответом
         """
-        def request() -> dict:
+        def request(max_tokens: int = None) -> dict:
             response = self.client.chat.completions.create(
                 model=self.model,
                 response_format={"type": "json_object"},
@@ -299,9 +383,20 @@ class LLMClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                **self._request_kwargs()
+                **self._request_kwargs(max_tokens)
             )
-            return self._extract_json(self._extract_content(response))
+            content, finish_reason = self._read_answer(response)
+            if not content and finish_reason != "length":
+                raise ValueError("LLM вернул пустой ответ")
+            try:
+                # Обрыв по токенам ещё не беда, если JSON успел закрыться.
+                return self._extract_json(content)
+            except ValueError:
+                if finish_reason == "length":
+                    raise LLMTruncatedError(
+                        content, self._limit_or_none(max_tokens)
+                    ) from None
+                raise
 
         return self._call("JSON-ответ", request, max_retries)
 
