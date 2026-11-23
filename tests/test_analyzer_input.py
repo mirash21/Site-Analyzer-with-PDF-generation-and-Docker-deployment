@@ -123,6 +123,69 @@ def test_candidate_links_matches_transliterated_paths(analyzer):
     assert links == ["https://tateng.ru/katalog-produktsii/izmeritelnye-instrumenty-insize"]
 
 
+def test_business_facts_are_taken_out_of_markup_verbatim(analyzer):
+    html = """
+    <html><body>
+    <a href="tel:+78432001122">+7 (843) 200-11-22</a>
+    <a href="mailto:info@tateng.ru">написать</a>
+    <p>Официальный дилер: ООО «Татинженер», ИНН 1657012345, ОГРН 1071690000000</p>
+    <p>Резец проходной — 4 850 руб.</p>
+    <p>Калибр-скоба INSIZE — 12 300 рублей</p>
+    <p>Работаем с 2007 года, сертификат AS9100, тел. 8-917-200-11-22</p>
+    </body></html>
+    """
+
+    facts = analyzer.extract_business_facts(html)
+
+    assert facts["phones"] == ["+7 (843) 200-11-22", "+7 (917) 200-11-22"], (
+        "один номер — одна запись, и в едином формате, а не как в разметке"
+    )
+    assert "info@tateng.ru" in facts["emails"]
+    assert facts["legal_entities"] == ["ООО «Татинженер»"], "реквизиты не должны приклеиваться к названию"
+    assert "ИНН 1657012345" in facts["requisites"]
+    assert facts["prices"] == [4850, 12300], "«2007 года» и «AS9100» ценой стать не должны"
+
+
+def test_business_facts_say_nothing_was_found(analyzer):
+    html = "<html><body><p>Только текст без чисел и контактов</p></body></html>"
+
+    facts = analyzer.extract_business_facts(html)
+    rendered = analyzer.render_business_facts(facts)
+
+    assert facts["prices"] == [] and facts["phones"] == []
+    assert "не указаны" in rendered
+    assert "не найдены" in rendered
+
+
+def test_coverage_names_pages_and_missing_data(analyzer):
+    sources = [
+        {"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "T", "chars": 2000},
+        {"id": 2, "url": "https://tateng.ru/catalog", "path": "/catalog", "title": "C", "chars": 1000},
+    ]
+    facts = {"phones": ["+78432001122"], "emails": [], "legal_entities": [], "requisites": [], "prices": []}
+
+    coverage = analyzer.describe_coverage(sources, facts, 18000)
+
+    assert "Прочитано страниц: 2" in coverage
+    assert "главная + 1 внутренних" in coverage
+    assert "почта" in coverage and "цены" in coverage
+    assert "телефоны" not in coverage.split("Не найдено")[1], "найденное не записывают в отсутствующее"
+
+
+def test_report_carries_coverage_and_verbatim_data(analyzer):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "T", "chars": 2000}]
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": []}
+
+    normalized = analyzer._normalize_final_analysis({"brief_analysis": "разбор"}, sources, facts)
+
+    assert "Прочитано страниц: 1" in normalized["data_coverage"]
+    assert "raw_site_data" not in normalized, "из пустых данных раздел не делают"
+
+    facts_with_prices = dict(facts, prices=[4850])
+    normalized = analyzer._normalize_final_analysis({"brief_analysis": "разбор"}, sources, facts_with_prices)
+    assert "4 850" in normalized["raw_site_data"]
+
+
 def test_fit_cuts_on_line_boundary(analyzer):
     text = "первая строка\nвторая строка\nтретья строка"
     fitted = analyzer._fit(text, 30)
@@ -163,8 +226,24 @@ def test_candidate_links_pick_offer_pages(analyzer):
     assert links[:1] == ["https://tateng.ru/catalog"]
     assert all("other.example" not in link for link in links)
     assert all("mailto" not in link for link in links)
-    assert all("contacts" not in link for link in links), "страница без товарных ключей не берётся"
+    # Контакты и «о компании» теперь берём намеренно: там телефоны, юрлицо и
+    # реквизиты, без которых отчёт нельзя ни проверить, ни оценить.
+    assert any("contacts" in link for link in links)
+    assert any("about" in link for link in links)
     assert len(links) <= analyzer_module.MAX_EXTRA_PAGES
+
+
+def test_links_spread_over_sections_instead_of_one_catalog(analyzer):
+    html = "<html><body>" + "".join(
+        f'<a href="/katalog-produktsii/group-{index}">Товары группы {index}</a>' for index in range(1, 8)
+    ) + '<a href="/contacts">Контакты</a><a href="/prices">Цены</a></body></html>'
+
+    links = analyzer.candidate_links("https://tateng.ru/", html)
+
+    catalog_pages = [link for link in links if "/katalog-produktsii/" in link]
+    assert len(catalog_pages) <= analyzer_module.MAX_PAGES_PER_SECTION
+    assert any(link.endswith("/contacts") for link in links)
+    assert any(link.endswith("/prices") for link in links)
 
 
 def test_collect_site_text_adds_inner_pages_within_budget(analyzer, monkeypatch):
@@ -197,7 +276,7 @@ def test_collect_site_evidence_numbers_every_read_page(analyzer, monkeypatch):
     }
     monkeypatch.setattr(analyzer, "fetch_site_html", lambda url: pages[url])
 
-    text, sources = analyzer.collect_site_evidence("https://tateng.ru/")
+    text, sources, facts = analyzer.collect_site_evidence("https://tateng.ru/")
 
     assert sources[0]["id"] == 1 and sources[0]["url"] == "https://tateng.ru/"
     assert [source["id"] for source in sources] == list(range(1, len(sources) + 1))
@@ -206,6 +285,9 @@ def test_collect_site_evidence_numbers_every_read_page(analyzer, monkeypatch):
     # Каждая прочитанная страница названа в тексте тем же номером, что и в реестре.
     for source in sources:
         assert f"## Источник {source['id']}:" in text
+    # Дословные данные идут отдельным блоком, а не растворяются в тексте страниц.
+    assert "## Данные, найденные в разметке страниц" in text
+    assert isinstance(facts, dict) and "prices" in facts
 
 
 def test_key_facts_resolve_source_numbers_to_real_urls(analyzer):
@@ -364,10 +446,11 @@ def test_normalization_rejects_non_object_answer(analyzer):
 
 def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
+    facts = {"phones": ["+7 843 200 11 22"], "emails": [], "legal_entities": [], "requisites": [], "prices": [1200]}
     monkeypatch.setattr(
         analyzer,
         "collect_site_evidence",
-        lambda url: ("структурированный текст сайта " * 10, sources),
+        lambda url: ("структурированный текст сайта " * 10, sources, facts),
     )
     analyzer.llm_client.answers = {
         "chat_json": {
@@ -388,3 +471,5 @@ def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     # Реестр прочитанного доезжает до отчёта, а факт получает ссылку на страницу.
     assert result["final_analysis"]["sources"]["rows"][0][1] == "https://tateng.ru/"
     assert result["final_analysis"]["key_facts"][0]["source"] == "https://tateng.ru/"
+    assert "+7 843 200 11 22" in result["final_analysis"]["raw_site_data"]
+    assert "Прочитано страниц: 1" in result["final_analysis"]["data_coverage"]

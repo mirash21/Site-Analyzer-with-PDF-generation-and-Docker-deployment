@@ -15,7 +15,7 @@ class SSRFError(Exception):
 
 # Максимальная длина текста сайта, отправляемого в LLM (в символах).
 # Ограничивает стоимость и время анализа больших страниц.
-MAX_SITE_TEXT_LENGTH = 12000
+MAX_SITE_TEXT_LENGTH = 18000
 
 # Теги, в которых маркетингового содержания нет.
 NOISE_TAGS = (
@@ -39,13 +39,15 @@ FALLBACK_BLOCK_TAGS = ("div", "td", "th", "span", "dd", "dt", "li", "p")
 MIN_CONTENT_LENGTH = 400
 MIN_FALLBACK_LINE_LENGTH = 40
 
-# Кроме главной разбираем ещё несколько внутренних страниц: у каталогов
-# офферы лежат там, а на главной — только меню.
-MAX_EXTRA_PAGES = 2
-EXTRA_PAGES_SHARE = 0.35
-MENU_SHARE = 0.08
+# Кроме главной разбираем несколько внутренних страниц: у каталогов офферы
+# лежат там, а на главной — только меню.
+MAX_EXTRA_PAGES = 6
+MAX_PAGES_PER_SECTION = 2
+EXTRA_PAGES_SHARE = 0.45
+MENU_SHARE = 0.06
 SITE_FETCH_TIMEOUT = 15
 MIN_EXTRA_PAGE_CHARS = 200
+FACTS_BLOCK_ROOM = 1200
 
 # Модель ссылается на страницы только номерами: адрес она обязана взять из
 # реестра, а не сочинять. Не распознанный номер факт не теряет, но помечается.
@@ -57,8 +59,30 @@ SOURCE_REFERENCE_UNRESOLVED = "источник не распознан"
 PAGE_LINK_KEYWORDS = (
     "catalog", "katalog", "category", "product", "produkt", "goods",
     "price", "pric", "about", "company", "servic", "brand", "item",
+    "contact", "kontak", "adres", "delivery", "dostavk", "oplata", "payment",
+    "sertif", "dokument", "review", "otzyv",
     "каталог", "продукц", "товар", "цен", "услуг", "о-комп", "окомп", "бренд",
+    "контакт", "адрес", "доставк", "оплат", "сертиф", "документ", "отзыв",
 )
+
+# Числа, которые отчёт обязан видеть в исходном виде. Модель не умеет читать
+# разметку, а цены, телефоны и реквизиты нужны в отчёте дословно: иначе в
+# экономическом разделе появляются красивые, но выдуманные значения.
+PHONE_PATTERN = re.compile(r"(?:\+7|8)[\s(+]?[0-9()\- ]{9,18}[0-9]")
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Форма + название из одного-трёх слов без цифр и запятых: жадный класс
+# захватывал «ООО «Татинженер», ИНН 1657012345, ОГРН 10716» целиком.
+LEGAL_ENTITY_PATTERN = re.compile(
+    r"\b(?:ООО|ОАО|ПАО|ЗАО|АО|ИП)\s*[«»\"']?\s*(?:[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-]{1,24}[ ]?){1,3}[«»\"']?"
+)
+REQUISITE_PATTERNS = (
+    ("ИНН", re.compile(r"ИНН\s*:?\s*(\d{10,12})", re.I)),
+    ("КПП", re.compile(r"КПП\s*:?\s*(\d{10})", re.I)),
+    ("ОГРН", re.compile(r"ОГРНИ?П?\s*:?\s*(\d{13,15})", re.I)),
+)
+PRICE_PATTERN = re.compile(r"(\d[\d\s\u00a0]{0,9})\s*(?:руб(?:\.|лей)?\b|₽)", re.I)
+MIN_PLAUSIBLE_PRICE = 10
+MAX_PLAUSIBLE_PRICE = 100_000_000
 
 
 class SiteAnalyzer:
@@ -302,6 +326,159 @@ class SiteAnalyzer:
             window = window[:cut]
         return window.rstrip() + "\n…(остальное не поместилось в лимит)"
 
+    @staticmethod
+    def _unique(values) -> List[str]:
+        """Убирает повторы, порядок первого вхождения сохраняет."""
+        seen: set = set()
+        out: List[str] = []
+        for value in values:
+            cleaned = re.sub(r"\s+", " ", str(value)).strip(" .,;:")
+            if cleaned and cleaned.lower() not in seen:
+                seen.add(cleaned.lower())
+                out.append(cleaned)
+        return out
+
+    @staticmethod
+    def _format_phone(digits: str) -> str:
+        """11 цифр -> «+7 (843) 240-64-32»: один формат вместо восьми записей одного номера."""
+        return f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"
+
+    @classmethod
+    def _phones_in(cls, text: str) -> List[str]:
+        """Российские номера: одиннадцать цифр, начинаются с 7 или 8.
+
+        По маске с кодом 9xx городские номера терялись, и отчёт выходил без
+        телефона даже там, где он написан в шапке. Один и тот же номер в
+        разметке встречается и как tel:, и как текст — считаем его один раз.
+        """
+        by_digits: Dict[str, str] = {}
+        for raw in PHONE_PATTERN.findall(text):
+            digits = re.sub(r"\D", "", raw)
+            if len(digits) != 11 or digits[0] not in "78":
+                continue
+            by_digits.setdefault(digits[1:], cls._format_phone(digits))
+        return list(by_digits.values())
+
+    @classmethod
+    def extract_business_facts(cls, html: str) -> Dict:
+        """Телефоны, цены, юрлица и реквизиты, найденные в разметке страницы.
+
+        Модель эти значения видит только если их передать текстом, а без них в
+        экономическом разделе отчёта появляются правдоподобные, но выдуманные
+        цифры. Здесь всё, что на сайте написано буквально.
+        """
+        try:
+            visible = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+        except Exception:
+            visible = ""
+
+        # href="tel:..." и href="mailto:..." в видимом тексте отсутствуют.
+        haystack = f"{html}\n{visible}"
+
+        prices = []
+        for raw in PRICE_PATTERN.findall(haystack):
+            digits = re.sub(r"\D", "", raw)
+            if not digits:
+                continue
+            value = int(digits)
+            if MIN_PLAUSIBLE_PRICE <= value <= MAX_PLAUSIBLE_PRICE:
+                prices.append(value)
+
+        requisites = []
+        for label, pattern in REQUISITE_PATTERNS:
+            requisites.extend(f"{label} {value}" for value in pattern.findall(haystack))
+
+        return {
+            "phones": cls._phones_in(haystack),
+            "emails": cls._unique(EMAIL_PATTERN.findall(haystack)),
+            "legal_entities": cls._unique(LEGAL_ENTITY_PATTERN.findall(visible or haystack)),
+            "requisites": cls._unique(requisites),
+            "prices": sorted(set(prices)),
+        }
+
+    @classmethod
+    def _merge_facts(cls, target: Dict, addition: Dict) -> Dict:
+        for key in ("phones", "emails", "legal_entities", "requisites"):
+            target[key] = cls._unique(list(target.get(key, [])) + list(addition.get(key, [])))
+        target["prices"] = sorted(set(target.get("prices", [])) | set(addition.get("prices", [])))
+        return target
+
+    @staticmethod
+    def _money(value: int) -> str:
+        """1200 -> «1 200»: неразрывные пробелы в отчёте читают лучше запятых."""
+        return f"{int(value):,}".replace(",", " ")
+
+    @staticmethod
+    def render_business_facts(facts: Dict) -> str:
+        """Блок «что на страницах написано буквально» для промпта и отчёта."""
+        prices = list(facts.get("prices") or [])
+        lines = ["## Данные, найденные в разметке страниц (без интерпретации)"]
+
+        def pair(label: str, values: List[str]) -> str:
+            return f"{label}: " + ("; ".join(values) if values else "не найдены")
+
+        lines.append(pair("Телефоны", facts.get("phones") or []))
+        lines.append(pair("Почта", facts.get("emails") or []))
+        lines.append(pair("Юридические лица", facts.get("legal_entities") or []))
+        lines.append(pair("Реквизиты", facts.get("requisites") or []))
+
+        if prices:
+            sample = ", ".join(SiteAnalyzer._money(value) for value in prices[:8])
+            lines.append(
+                f"Цены: найдено {len(prices)} различных значений, диапазон "
+                f"{SiteAnalyzer._money(min(prices))}–{SiteAnalyzer._money(max(prices))} руб. "
+                f"Примеры: {sample}."
+            )
+        else:
+            lines.append(
+                "Цены: на прочитанных страницах не указаны. В отчёте так и писать, "
+                "не подставляя вместо них отраслевые допущения."
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def describe_coverage(sources: List[Dict], facts: Dict, budget: int) -> str:
+        """Сколько реально прочитано: читатель должен знать потолок выводов."""
+        read = sum(source.get("chars", 0) for source in sources or [])
+        missing = [
+            label
+            for label, values in (
+                ("телефоны", facts.get("phones")),
+                ("почта", facts.get("emails")),
+                ("юрлицо", facts.get("legal_entities")),
+                ("реквизиты", facts.get("requisites")),
+                ("цены", facts.get("prices")),
+            )
+            if not values
+        ]
+        parts = [
+            f"Прочитано страниц: {len(sources or [])} (главная + "
+            f"{max(len(sources or []) - 1, 0)} внутренних).",
+            f"Знаков текста сайта: {read} из бюджета {budget}.",
+        ]
+        if missing:
+            parts.append("Не найдено на прочитанных страницах: " + ", ".join(missing) + ".")
+        return " ".join(parts)
+
+    @staticmethod
+    def _spread_over_sections(links: List[str]) -> List[str]:
+        """Не больше MAX_PAGES_PER_SECTION ссылок из одного раздела сайта.
+
+        Каталог выдаёт десятки однотипных подстраниц, и без ограничения
+        анализ съедали шесть групп товаров, а контакты и условия поставки
+        не попадали в поле зрения.
+        """
+        per_section: Dict[str, int] = {}
+        spread: List[str] = []
+        for link in links:
+            section = (urlparse(link).path.strip("/").split("/") or [""])[0].lower()
+            taken = per_section.get(section, 0)
+            if taken >= MAX_PAGES_PER_SECTION:
+                continue
+            per_section[section] = taken + 1
+            spread.append(link)
+        return spread
+
     def candidate_links(self, base_url: str, html: str) -> List[str]:
         """Внутренние ссылки этого же хоста, где обычно живёт оффер."""
         soup = BeautifulSoup(html, "html.parser")
@@ -333,7 +510,9 @@ class SiteAnalyzer:
             seen.add(path.lower())
             links.append(absolute)
 
-        return links[:MAX_EXTRA_PAGES]
+        # Ограничение накладывается после разбора всех ссылок: если резать
+        # сразу, шесть страниц каталога вытеснят контакты и цены.
+        return self._spread_over_sections(links)[:MAX_EXTRA_PAGES]
 
     @staticmethod
     def _page_title(html: str) -> str:
@@ -347,8 +526,8 @@ class SiteAnalyzer:
         heading = soup.find("h1")
         return re.sub(r"\s+", " ", heading.get_text(strip=True)).strip() if heading else ""
 
-    def collect_site_evidence(self, url: str) -> Tuple[str, List[Dict]]:
-        """Текст сайта плюс реестр прочитанных страниц.
+    def collect_site_evidence(self, url: str) -> Tuple[str, List[Dict], Dict]:
+        """Текст сайта, реестр прочитанных страниц и дословные данные с них.
 
         Реестр нужен, чтобы отчёт можно было проверить: модель ссылается на номер
         источника, а адрес подставляется здесь из реально скачанных страниц.
@@ -360,6 +539,7 @@ class SiteAnalyzer:
             raise Exception("На странице нет читаемого текста — возможно, сайт собран скриптами")
 
         start = urlparse(url)
+        facts = self.extract_business_facts(html)
         sources: List[Dict] = [{
             "id": 1,
             "url": url,
@@ -382,6 +562,7 @@ class SiteAnalyzer:
             extra_content, _ = self.extract_page_text(extra_html)
             if len(extra_content) < MIN_EXTRA_PAGE_CHARS:
                 continue
+            self._merge_facts(facts, self.extract_business_facts(extra_html))
 
             source_id = len(sources) + 1
             path = urlparse(link).path.rstrip("/") or "/"
@@ -401,21 +582,26 @@ class SiteAnalyzer:
 
         # Главная получает первый номер: ссылки вида «Источник 1» должны
         # вести на неё, а не на первую попавшуюся внутреннюю страницу.
-        unused = max(0, extra_room - sum(len(part) for part in extras))
+        facts_block = self.render_business_facts(facts)
+        unused = max(
+            0,
+            extra_room - sum(len(part) for part in extras) - len(facts_block),
+        )
         main_room = MAX_SITE_TEXT_LENGTH - menu_room - extra_room + unused
         parts = [f"## Источник 1: {sources[0]['path']}\n{self._fit(content, main_room)}"]
         parts.extend(extras)
+        parts.append(self._fit(facts_block, FACTS_BLOCK_ROOM))
         if menu:
             parts.append(self._fit(menu, menu_room))
-        return "\n\n".join(part for part in parts if part), sources
+        return "\n\n".join(part for part in parts if part), sources, facts
 
     def collect_site_text(self, url: str) -> str:
-        """Текст главной плюс пара внутренних страниц, в пределах бюджета.
+        """Текст главной плюс внутренние страницы, в пределах бюджета.
 
         Одной главной страницы каталога не хватает: там только меню, поэтому
         разбор выходил общим и не про конкретный товар.
         """
-        text, _ = self.collect_site_evidence(url)
+        text, _, _ = self.collect_site_evidence(url)
         return text
 
     def generate_analysis_steps(self, site_text: str) -> List[str]:
@@ -481,6 +667,7 @@ class SiteAnalyzer:
         intermediate_results: List[Dict[str, str]],
         site_text: str,
         sources: List[Dict] | None = None,
+        facts: Dict | None = None,
     ) -> Dict:
         """
         Генерирует финальный анализ сайта на основе промежуточных результатов.
@@ -524,7 +711,7 @@ class SiteAnalyzer:
 
         response = self.llm_client.chat_json(system_prompt, user_prompt)
 
-        return self._normalize_final_analysis(response, sources)
+        return self._normalize_final_analysis(response, sources, facts)
 
     @staticmethod
     def _markdown_table_to_grid(text: str) -> Dict:
@@ -658,7 +845,7 @@ class SiteAnalyzer:
         }
 
     @classmethod
-    def _normalize_final_analysis(cls, response: Dict, sources=None) -> Dict:
+    def _normalize_final_analysis(cls, response: Dict, sources=None, facts=None) -> Dict:
         """Приводит ответ модели к форме, которую рисуют интерфейс и PDF.
 
         Без этого списка строк в ad_examples превращались в кашу, таблица
@@ -710,6 +897,14 @@ class SiteAnalyzer:
         if sources_table:
             result["sources"] = sources_table
 
+        # Потолочный разбор: читатель обязан видеть, сколько реально прочитано
+        # и чего на страницах не было. Это считает код, а не модель.
+        if sources:
+            facts = facts or {}
+            result["data_coverage"] = cls.describe_coverage(sources, facts, MAX_SITE_TEXT_LENGTH)
+            if any(facts.get(key) for key in ("phones", "emails", "legal_entities", "requisites", "prices")):
+                result["raw_site_data"] = cls.render_business_facts(facts)
+
         return result
 
     def analyze_site(self, url: str) -> Dict:
@@ -731,7 +926,7 @@ class SiteAnalyzer:
         """
         # Шаг 1-2: скачиваем главную и внутренние страницы, приводим к
         # структурированному тексту в пределах бюджета и запоминаем, что читали.
-        site_text, sources = self.collect_site_evidence(url)
+        site_text, sources, facts = self.collect_site_evidence(url)
 
         if not site_text or len(site_text) < 100:
             raise Exception("Не удалось получить достаточное количество текста с сайта")
@@ -745,7 +940,7 @@ class SiteAnalyzer:
         intermediate_results = self.execute_analysis_steps(steps, site_text)
         
         # Шаг 5: Генерируем финальный анализ
-        final_analysis = self.generate_final_analysis(intermediate_results, site_text, sources)
+        final_analysis = self.generate_final_analysis(intermediate_results, site_text, sources, facts)
         
         # Формируем итоговый результат
         return {
