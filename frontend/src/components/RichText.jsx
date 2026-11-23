@@ -204,7 +204,11 @@ function StructuredValue({ value, depth = 0 }) {
   }
 
   if (typeof value === 'object') {
-    const entries = Object.entries(value)
+    // Пустое поле — не данные: у Telegram Ads заголовка нет, и строка
+    // «Заголовок: » без текста выдаёт отчёт недоделанным.
+    const entries = Object.entries(value).filter(
+      ([, item]) => !(item === null || item === undefined || (typeof item === 'string' && !item.trim()))
+    )
     if (entries.length === 0) return <span className="report-empty">пусто</span>
     return (
       <dl className="report-dl">

@@ -210,6 +210,43 @@ MUTATIONS = [
         '    if BARE_URL.fullmatch(whole):',
         '    if False:',
     ),
+    (
+        "analyzer: правило «пиши по-русски» выключено из всех промптов",
+        "app/services/analyzer.py",
+        '    "Пиши по-русски. Английское слово оставь только если это название бренда "',
+        '    "Пиши как удобно. Английское слово оставь только если это название бренда "',
+    ),
+    (
+        "analyzer: шаг анализа остался без правила о языке",
+        "app/services/analyzer.py",
+        '"заголовков h1 и пересказа исходного текста. "\n                + RUSSIAN_ONLY_RULE',
+        '"заголовков h1 и пересказа исходного текста."',
+    ),
+    (
+        "analyzer: итоговый отчёт остался без правила о языке",
+        "app/services/analyzer.py",
+        '"Если данных нет — честно пиши об этом в data_gaps, не заменяя их догадками. "\n            + RUSSIAN_ONLY_RULE',
+        '"Если данных нет — честно пиши об этом в data_gaps, не заменяя их догадками."',
+    ),
+    # --- PDF не имеет права падать на разметке модели -----------------
+    (
+        "pdf: код в бэктиках раскрыт до выделения и склеивает звёздочки в <i>",
+        "app/services/pdf_report.py",
+        "    text = INLINE_CODE.sub(stash, text)",
+        '    text = INLINE_CODE.sub(lambda m: f\'<font face="Courier">{m.group("text")}</font>\', text)',
+    ),
+    (
+        "pdf: незакрытый тег снова роняет весь отчёт",
+        "app/services/pdf_report.py",
+        "    return _balanced(text)",
+        "    return text",
+    ),
+    (
+        "pdf: жирный курсив закрыт вразнобой",
+        "app/services/pdf_report.py",
+        "    text = INLINE_TRIPLE.sub(lambda m: f\"<b><i>{m.group('text')}</i></b>\", text)",
+        "    text = INLINE_TRIPLE.sub(lambda m: f\"<b><i>{m.group('text')}</b></i>\", text)",
+    ),
 ]
 
 

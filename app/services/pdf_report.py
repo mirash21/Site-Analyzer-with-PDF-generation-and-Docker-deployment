@@ -10,7 +10,7 @@
 import io
 import re
 from datetime import datetime
-from typing import Any, List, Sequence
+from typing import Any, List, Sequence, Tuple
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -127,6 +127,39 @@ INLINE_BOLD = re.compile(r"\*\*(?P<text>.+?)\*\*")
 INLINE_ITALIC = re.compile(r"(?<!\*)\*(?!\*)(?P<text>[^*\n]+?)\*(?!\*)")
 INLINE_CODE = re.compile(r"`(?P<text>[^`\n]+)`")
 INLINE_LINK = re.compile(r"\[(?P<text>[^\]]+)\]\((?P<href>[^)\s]+)\)")
+# Жирный курсив модель пишет именно так, тремя звёздочками; без этого правила
+# они раскладываются в <b><i>…</b></i>, и ReportLab падает на незакрытом теге.
+INLINE_TRIPLE = re.compile(r"(?<!\*)\*{3}(?!\*)(?P<text>[^*\n]+?)\*{3}(?!\*)")
+# Метки, которые вставляет inline_markup: чужих тегов в тексте нет, потому что
+# escape() закрыл «<» ещё до подстановки.
+INLINE_TAG = re.compile(r"</?(b|i|u|font|link|strike|super|sub)\b[^>]*>")
+CODE_MARK = re.compile(r"\x02(\d+)\x02")
+
+
+def _balanced(text: str) -> str:
+    """Убирает теги выделения, которым не нашлось пары.
+
+    Один абзац с незакрытым тегом стоил клиенту HTTP 500 вместо скачивания
+    всего отчёта: ReportLab на разметке не спорит, а бросает исключение.
+    Выделение при этом теряется, текст остаётся.
+    """
+    stack: List[Tuple[int, int, str]] = []
+    drop: List[Tuple[int, int]] = []
+
+    for match in INLINE_TAG.finditer(text):
+        name = match.group(1)
+        if match.group(0).startswith("</"):
+            if stack and stack[-1][2] == name:
+                stack.pop()
+            else:
+                drop.append(match.span())
+        else:
+            stack.append((match.start(), match.end(), name))
+
+    drop.extend((start, end) for start, end, _ in stack)
+    for start, end in sorted(drop, reverse=True):
+        text = text[:start] + text[end:]
+    return text
 
 
 def inline_markup(raw: str) -> str:
@@ -136,14 +169,30 @@ def inline_markup(raw: str) -> str:
     подставить в PDF теги разметки.
     """
     # escape() уже закрыл & < >, поэтому для href остаётся закрыть кавычки.
-    text = escape(str(raw if raw is not None else ""))
+    # Управляющий \x02 печатных символов не имеет, но мог бы столкнуться с
+    # меткой защищённого куска — вычищаем его заранее.
+    text = escape(str(raw if raw is not None else "")).replace("\x02", "")
     text = INLINE_LINK.sub(
         lambda m: f'<link href="{m.group("href").replace(chr(34), "&quot;")}" color="#4f46e5">{m.group("text")}</link>',
         text,
     )
+
+    # Код в бэктиках убираем до выделения: в шаге анализа модель написала
+    # «`/katalog/*` и `/uslugi/*`», две звёздочки из разных кусков склеились в
+    # <i>, тег остался незакрытым, и PDF не собрался целиком.
+    spans: List[str] = []
+
+    def stash(match: re.Match) -> str:
+        spans.append(match.group("text"))
+        return f"\x02{len(spans) - 1}\x02"
+
+    text = INLINE_CODE.sub(stash, text)
+    text = INLINE_TRIPLE.sub(lambda m: f"<b><i>{m.group('text')}</i></b>", text)
     text = INLINE_BOLD.sub(lambda m: f"<b>{m.group('text')}</b>", text)
     text = INLINE_ITALIC.sub(lambda m: f"<i>{m.group('text')}</i>", text)
-    text = INLINE_CODE.sub(lambda m: f'<font face="Courier">{m.group("text")}</font>', text)
+    text = CODE_MARK.sub(
+        lambda m: f'<font face="Courier">{spans[int(m.group(1))]}</font>', text
+    )
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     # Адрес из реестра источников: в PDF он должен открываться, а не переписываться
@@ -151,7 +200,7 @@ def inline_markup(raw: str) -> str:
     whole = text.strip()
     if BARE_URL.fullmatch(whole):
         return f'<link href="{whole}" color="#4f46e5">{whole}</link>'
-    return text
+    return _balanced(text)
 
 
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")

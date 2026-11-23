@@ -633,6 +633,23 @@ def test_campaign_plan_prompt_asks_for_semantics_and_negatives(analyzer):
     assert len(system_prompt) < 6000
 
 
+def test_every_prompt_tells_the_model_to_write_in_russian(analyzer):
+    # Живой разбор tateng.ru выдал «базе контактов beyond одной компании».
+    # Правило должно лежать во всех запросах: в одном — и пробел останется.
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": []}
+    steps = [{"step_number": 1, "step": "шаг", "result": "ответ"}]
+
+    analyzer.execute_analysis_steps(["Выделить сегменты"], "текст сайта")
+    analyzer.generate_final_analysis(steps, "текст сайта")
+    analyzer.generate_campaign_plan(steps, "текст сайта", facts)
+    analyzer.generate_economics(steps, "текст сайта", facts)
+
+    prompts = [call[1] for call in analyzer.llm_client.calls]
+    assert len(prompts) == 4, "проверка не должна молча пройти мимо нового запроса"
+    for system_prompt in prompts:
+        assert "Пиши по-русски" in system_prompt
+
+
 def test_semantic_list_is_capped(analyzer):
     plan = analyzer._normalize_campaign_plan(
         {"keyword_seeds": [f"купить товар {index}" for index in range(80)], "negative_keywords": ["скачать"]}

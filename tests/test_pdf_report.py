@@ -182,3 +182,45 @@ def test_filename_is_ascii_safe():
         "analysis_tateng.ru_2026-11-23.pdf"
     )
     assert pdf_filename("", "") == "analysis_analysis_report.pdf"
+
+
+def test_markup_inside_code_spans_stays_literal():
+    # Живой шаг анализа: «`/katalog-produktsii/*` и `/uslugi/*`». Две
+    # звёздочки из разных кусков склеивались в незакрытый <i>, и PDF не
+    # собрался целиком — клиент вместо файла получил HTTP 500.
+    line = "Сегментировать по URL: `/katalog-produktsii/*` и `/uslugi-po-obrabotke-metalla/*`"
+
+    markup = inline_markup(line)
+
+    assert "<i>" not in markup, "звёздочка внутри кода — символ пути, а не разметка"
+    assert markup.count("<font") == markup.count("</font") == 2
+    assert "/katalog-produktsii/*" in markup
+
+
+def test_bold_italic_stars_do_not_split_into_unbalanced_tags():
+    assert inline_markup("***важно***") == "<b><i>важно</i></b>"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "***текст***",
+        "**текст *курсив** ещё*",
+        "`*`*",
+        "**текст",
+        "текст**",
+        "*a`b*",
+        "[ссылка](x)*",
+        "a\x020\x02b",
+        "```",
+        "***",
+        "| таблица | без | закрытия",
+    ],
+)
+def test_any_markdown_crumbs_survive_the_pdf(value):
+    """Ни один обрывок разметки не имеет права уронить скачивание отчёта."""
+    analysis = sample_analysis()
+    analysis["intermediate_results"][0]["result"] = f"- {value}\n- обычный пункт"
+    analysis["final_analysis"]["brief_analysis"] = value
+
+    assert build_analysis_pdf(analysis).startswith(b"%PDF-")
