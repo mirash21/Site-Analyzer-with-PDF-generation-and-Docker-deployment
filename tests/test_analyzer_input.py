@@ -73,6 +73,56 @@ def test_extraction_separates_chrome_from_content(analyzer):
     assert menu.startswith("Меню и обвязка сайта")
 
 
+def test_extraction_survives_empty_main_marker(analyzer):
+    # Живые сайты ставят <main>/<article> декорацией: на tateng.ru <article>
+    # был пустым, и разбор выдавал одну строку вместо всей страницы.
+    html = """
+    <html><head><title>Завод</title></head><body>
+    <article></article>
+    <div>
+      <h1>Оборудование под заказ</h1>
+      <p>Изготавливаем нестандартные узлы по чертежам заказчика.</p>
+      <p>Гарантия на всю выпущенную продукцию — 24 месяца.</p>
+      <p>Отгружаем в любой регион России транспортными компаниями.</p>
+      <p>Собственный цех 1200 м2 и пять токарных станков с ЧПУ.</p>
+    </div>
+    </body></html>
+    """
+    content, _ = analyzer.extract_page_text(html)
+
+    assert "Оборудование под заказ" in content
+    assert content.count("\n") >= 4
+
+
+def test_extraction_falls_back_to_div_markup(analyzer):
+    html = """
+    <html><head><title>Бутик</title></head><body>
+    <div class="wrap">
+      <div class="card">Куршер кожаный ручной работы, три цвета в наличии</div>
+      <div class="card">Доставка по городу в день заказа, оплата при получении</div>
+      <div class="card">Обмен и возврат в течение тридцати дней без вопросов</div>
+    </div>
+    </body></html>
+    """
+    content, _ = analyzer.extract_page_text(html)
+
+    assert "Куршер кожаный ручной работы" in content
+    assert "Обмен и возврат" in content
+
+
+def test_candidate_links_matches_transliterated_paths(analyzer):
+    # Путь транслитерируют, а якорь остаётся русским — нужен либо путь, либо текст ссылки.
+    html = """
+    <html><body>
+      <a href="/katalog-produktsii/izmeritelnye-instrumenty-insize">Измерительные инструменты INSIZE</a>
+      <a href="/page4.html">Новости</a>
+    </body></html>
+    """
+    links = analyzer.candidate_links("https://tateng.ru/", html)
+
+    assert links == ["https://tateng.ru/katalog-produktsii/izmeritelnye-instrumenty-insize"]
+
+
 def test_fit_cuts_on_line_boundary(analyzer):
     text = "первая строка\nвторая строка\nтретья строка"
     fitted = analyzer._fit(text, 30)

@@ -33,6 +33,12 @@ CONTENT_TAGS = (
     "blockquote", "dt", "dd", "figcaption", "td", "th",
 )
 
+# Запас для вёрстки без p/li: на сайтах, где весь текст лежит в div, иначе
+# разбор выходит пустым.
+FALLBACK_BLOCK_TAGS = ("div", "td", "th", "span", "dd", "dt", "li", "p")
+MIN_CONTENT_LENGTH = 400
+MIN_FALLBACK_LINE_LENGTH = 40
+
 # Кроме главной разбираем ещё несколько внутренних страниц: у каталогов
 # офферы лежат там, а на главной — только меню.
 MAX_EXTRA_PAGES = 2
@@ -40,10 +46,13 @@ EXTRA_PAGES_SHARE = 0.35
 MENU_SHARE = 0.08
 SITE_FETCH_TIMEOUT = 15
 
-# Ссылки, которые обычно ведут к офферу, а не к обвязке сайта.
+# Ссылки, которые обычно ведут к офферу, а не к обвязке сайта. Ищем и по
+# адресу, и по тексту ссылки: пути часто транслитерируют (katalog-produktsii),
+# а якорь при этом остаётся русским.
 PAGE_LINK_KEYWORDS = (
-    "catalog", "category", "product", "price", "about", "company", "service",
-    "каталог", "продукц", "товар", "цен", "услуг", "о-комп", "окомп",
+    "catalog", "katalog", "category", "product", "produkt", "goods",
+    "price", "pric", "about", "company", "servic", "brand", "item",
+    "каталог", "продукц", "товар", "цен", "услуг", "о-комп", "окомп", "бренд",
 )
 
 
@@ -160,6 +169,27 @@ class SiteAnalyzer:
             return ""
         return re.sub(r"\s+", " ", tag.get("content") or "").strip()
 
+    @staticmethod
+    def pick_lead(soup: BeautifulSoup):
+        """Контейнер, в котором реально больше всего текста.
+
+        Полагаться на первый найденный <main> или <article> нельзя: на живых
+        сайтах эти метки часто пустые декорации, и разбор выдавал пару строк
+        вместо всей страницы.
+        """
+        candidates = [soup.find("main"), soup.find("article"), soup.body, soup]
+        best, best_score = soup, -1
+        for node in candidates:
+            if node is None:
+                continue
+            score = sum(
+                len(block.get_text(" ", strip=True))
+                for block in node.find_all(list(CONTENT_TAGS))
+            )
+            if score > best_score:
+                best, best_score = node, score
+        return best
+
     def extract_page_text(self, html: str) -> Tuple[str, str]:
         """Разбирает страницу на блоки, сохраняя структуру.
 
@@ -198,7 +228,7 @@ class SiteAnalyzer:
         for node in soup.find_all(list(NOISE_TAGS)):
             node.decompose()
 
-        lead = soup.find(["main", "article"]) or soup.body or soup
+        lead = self.pick_lead(soup)
 
         lines: List[str] = []
         seen = set()
@@ -223,6 +253,18 @@ class SiteAnalyzer:
                 continue
             seen.add(entry)
             lines.append(entry)
+
+        if sum(len(line) for line in lines) < MIN_CONTENT_LENGTH:
+            # Вёрстка без единого p или li: берём текстовые листья div/td,
+            # иначе страница с одним контентом останется без содержания.
+            for node in lead.find_all(list(FALLBACK_BLOCK_TAGS)):
+                if node.find(list(FALLBACK_BLOCK_TAGS)):
+                    continue
+                text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+                if len(text) < MIN_FALLBACK_LINE_LENGTH or text in seen:
+                    continue
+                seen.add(text)
+                lines.append(text)
 
         header = []
         if title:
@@ -276,7 +318,10 @@ class SiteAnalyzer:
             if not path or path.lower() in seen:
                 continue
 
-            haystack = f"{path} {parsed.query}".lower()
+            # Якорь говорит не меньше пути: «Каталог продукции» ведёт на
+            # /katalog-produktsii, и по пути это не угадать.
+            anchor_text = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))
+            haystack = f"{path} {parsed.query} {anchor_text}".lower()
             if not any(word in haystack for word in PAGE_LINK_KEYWORDS):
                 continue
 
