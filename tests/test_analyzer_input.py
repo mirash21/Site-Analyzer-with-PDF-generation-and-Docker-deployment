@@ -181,9 +181,99 @@ def test_collect_site_text_adds_inner_pages_within_budget(analyzer, monkeypatch)
     text = analyzer.collect_site_text("https://tateng.ru/")
     budget = analyzer_module.MAX_SITE_TEXT_LENGTH
 
-    assert len(text) <= budget + 60, f"текст вышел за бюджет: {len(text)} > {budget}"
-    assert "## Страница /catalog" in text
+    assert len(text) <= budget + 200, f"текст вышел за бюджет: {len(text)} > {budget}"
+    assert "## Источник 2: /catalog" in text
     assert "Лидер по поставке оборудования" in text
+
+
+def test_collect_site_evidence_numbers_every_read_page(analyzer, monkeypatch):
+    inner = "<html><head><title>Каталог продукции</title></head><body><h1>Каталог</h1>" + "".join(
+        f"<p>Позиция {index}: описание товара с характеристиками.</p>" for index in range(40)
+    ) + "</body></html>"
+    pages = {
+        "https://tateng.ru/": PAGE,
+        "https://tateng.ru/catalog": inner,
+        "https://tateng.ru/about": inner,
+    }
+    monkeypatch.setattr(analyzer, "fetch_site_html", lambda url: pages[url])
+
+    text, sources = analyzer.collect_site_evidence("https://tateng.ru/")
+
+    assert sources[0]["id"] == 1 and sources[0]["url"] == "https://tateng.ru/"
+    assert [source["id"] for source in sources] == list(range(1, len(sources) + 1))
+    assert sources[1]["title"] == "Каталог продукции"
+    assert all(source["chars"] > 0 for source in sources)
+    # Каждая прочитанная страница названа в тексте тем же номером, что и в реестре.
+    for source in sources:
+        assert f"## Источник {source['id']}:" in text
+
+
+def test_key_facts_resolve_source_numbers_to_real_urls(analyzer):
+    sources = [
+        {"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 900},
+        {"id": 2, "url": "https://tateng.ru/catalog", "path": "/catalog", "title": "Каталог", "chars": 800},
+    ]
+
+    normalized = analyzer._normalize_final_analysis(
+        {
+            "brief_analysis": "текст",
+            "key_facts": [
+                {"fact": "Официальный представитель TaeguTec с 2007 года", "source": 1},
+                {"fact": "Есть измерительный инструмент INSIZE", "source": "Источник 2"},
+                {"fact": "Доставка во все регионы", "source": "https://tateng.ru/catalog"},
+            ],
+        },
+        sources,
+    )
+
+    urls = [fact["source"] for fact in normalized["key_facts"]]
+    assert urls == [
+        "https://tateng.ru/",
+        "https://tateng.ru/catalog",
+        "https://tateng.ru/catalog",
+    ]
+    assert normalized["key_facts"][1]["page"] == "/catalog"
+
+
+def test_invented_source_url_is_not_trusted(analyzer):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 900}]
+
+    normalized = analyzer._normalize_final_analysis(
+        {
+            "key_facts": [
+                {"fact": "Цены от 1 200 рублей", "source": "https://tateng.ru/prices"},
+                {"fact": "Сертификат AS9100", "source": 7},
+                {"fact": "Факт без ссылки", "source": None},
+            ]
+        },
+        sources,
+    )
+
+    unresolved = analyzer_module.SOURCE_REFERENCE_UNRESOLVED
+    assert [fact["source"] for fact in normalized["key_facts"]] == [unresolved, unresolved, unresolved]
+    assert all("page" not in fact for fact in normalized["key_facts"])
+
+
+def test_report_lists_read_pages_as_a_table(analyzer):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 900}]
+
+    normalized = analyzer._normalize_final_analysis({"brief_analysis": "текст"}, sources)
+
+    assert normalized["sources"]["columns"][0] == "№"
+    assert normalized["sources"]["rows"] == [["1", "https://tateng.ru/", "ТАТИНЖЕНЕР", "900"]]
+
+
+def test_final_prompt_asks_for_source_numbers_not_links(analyzer):
+    analyzer.generate_final_analysis(
+        [{"step_number": 1, "step": "шаг", "result": "ответ"}],
+        "## Источник 1: /\nтекст главной",
+        [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "T", "chars": 10}],
+    )
+
+    system_prompt = analyzer.llm_client.prompts("chat_json")[-1][1]
+    assert '"key_facts"' in system_prompt
+    assert "Источник N" in system_prompt
+    assert "не выдумывай" in system_prompt
 
 
 def test_collect_site_text_survives_broken_inner_page(analyzer, monkeypatch):
@@ -273,15 +363,17 @@ def test_normalization_rejects_non_object_answer(analyzer):
 
 
 def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
     monkeypatch.setattr(
         analyzer,
-        "collect_site_text",
-        lambda url: "структурированный текст сайта " * 10,
+        "collect_site_evidence",
+        lambda url: ("структурированный текст сайта " * 10, sources),
     )
     analyzer.llm_client.answers = {
         "chat_json": {
             "steps": ["Выделить сегменты"],
             "brief_analysis": "разбор",
+            "key_facts": [{"fact": "Работаем с 2007 года", "source": 1}],
             "comparison_table": {"columns": ["Сегмент"], "rows": [["Технологи"]]},
         },
         "chat_with_system": "- короткий ответ",
@@ -293,3 +385,6 @@ def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     assert result["url"] == "https://tateng.ru/"
     assert result["intermediate_results"][0]["step_number"] == 1
     assert result["final_analysis"]["comparison_table"]["rows"] == [["Технологи"]]
+    # Реестр прочитанного доезжает до отчёта, а факт получает ссылку на страницу.
+    assert result["final_analysis"]["sources"]["rows"][0][1] == "https://tateng.ru/"
+    assert result["final_analysis"]["key_facts"][0]["source"] == "https://tateng.ru/"

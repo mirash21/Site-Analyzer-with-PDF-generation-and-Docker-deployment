@@ -112,6 +112,35 @@ def test_emphasis_and_links_are_converted():
     assert '<link href="https://example.com?a=1&amp;b=2"' in rendered
 
 
+def test_bare_source_url_is_clickable_in_pdf():
+    rendered = inline_markup("https://tateng.ru/catalog?b=1&c=2")
+    assert rendered.startswith('<link href="https://tateng.ru/catalog?b=1&amp;c=2"')
+    assert rendered.endswith('</link>')
+
+
+def test_sources_and_key_facts_reach_the_pdf():
+    analysis = sample_analysis()
+    analysis["final_analysis"] = {
+        "brief_analysis": "разбор",
+        "key_facts": [
+            {"fact": "Официальный представитель TaeguTec", "source": "https://tateng.ru/", "page": "/"},
+            {"fact": "Факт без подтверждения", "source": "источник не распознан"},
+        ],
+        "sources": {
+            "columns": ["№", "Адрес страницы", "Заголовок страницы", "Знаков текста"],
+            "rows": [["1", "https://tateng.ru/", "ТАТИНЖЕНЕР", "4505"]],
+        },
+    }
+
+    pdf = build_analysis_pdf(analysis)
+
+    assert pdf.startswith(b"%PDF")
+    blocks = value_flowables(analysis["final_analysis"]["sources"], styles())
+    cells = [block for block in blocks if isinstance(block, Table)][0]._cellvalues
+    assert cells[0][1].text == "Адрес страницы"
+    assert 'href="https://tateng.ru/"' in cells[1][1].text
+
+
 @pytest.mark.parametrize(
     "value",
     [None, "", [], {}, 0, False, 12, ["строка"], {"вложенный": {"список": [1, 2]}}],

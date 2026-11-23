@@ -45,6 +45,11 @@ MAX_EXTRA_PAGES = 2
 EXTRA_PAGES_SHARE = 0.35
 MENU_SHARE = 0.08
 SITE_FETCH_TIMEOUT = 15
+MIN_EXTRA_PAGE_CHARS = 200
+
+# Модель ссылается на страницы только номерами: адрес она обязана взять из
+# реестра, а не сочинять. Не распознанный номер факт не теряет, но помечается.
+SOURCE_REFERENCE_UNRESOLVED = "источник не распознан"
 
 # Ссылки, которые обычно ведут к офферу, а не к обвязке сайта. Ищем и по
 # адресу, и по тексту ссылки: пути часто транслитерируют (katalog-produktsii),
@@ -330,16 +335,38 @@ class SiteAnalyzer:
 
         return links[:MAX_EXTRA_PAGES]
 
-    def collect_site_text(self, url: str) -> str:
-        """Текст главной плюс пара внутренних страниц, в пределах бюджета.
+    @staticmethod
+    def _page_title(html: str) -> str:
+        """Заголовок страницы — он идёт в список источников отчёта."""
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return ""
+        if soup.title:
+            return re.sub(r"\s+", " ", soup.title.get_text(strip=True)).strip()
+        heading = soup.find("h1")
+        return re.sub(r"\s+", " ", heading.get_text(strip=True)).strip() if heading else ""
 
-        Одной главной страницы каталога не хватает: там только меню, поэтому
-        разбор выходил общим и не про конкретный товар.
+    def collect_site_evidence(self, url: str) -> Tuple[str, List[Dict]]:
+        """Текст сайта плюс реестр прочитанных страниц.
+
+        Реестр нужен, чтобы отчёт можно было проверить: модель ссылается на номер
+        источника, а адрес подставляется здесь из реально скачанных страниц.
+        Ссылка, сочинённая моделью, в отчёт не попадает.
         """
         html = self.fetch_site_html(url)
         content, menu = self.extract_page_text(html)
         if not content:
             raise Exception("На странице нет читаемого текста — возможно, сайт собран скриптами")
+
+        start = urlparse(url)
+        sources: List[Dict] = [{
+            "id": 1,
+            "url": url,
+            "path": start.path or "/",
+            "title": self._page_title(html),
+            "chars": len(content),
+        }]
 
         menu_room = int(MAX_SITE_TEXT_LENGTH * MENU_SHARE)
         extra_room = int(MAX_SITE_TEXT_LENGTH * EXTRA_PAGES_SHARE)
@@ -353,19 +380,43 @@ class SiteAnalyzer:
                 # Внутренняя страница не важнее всего анализа: пропускаем её.
                 continue
             extra_content, _ = self.extract_page_text(extra_html)
-            if len(extra_content) < 200:
+            if len(extra_content) < MIN_EXTRA_PAGE_CHARS:
                 continue
+
+            source_id = len(sources) + 1
             path = urlparse(link).path.rstrip("/") or "/"
-            extras.append(f"## Страница {path}\n{self._fit(extra_content, per_extra_room)}")
-            if len(extras) >= MAX_EXTRA_PAGES:
+            sources.append({
+                "id": source_id,
+                "url": link,
+                "path": path,
+                "title": self._page_title(extra_html),
+                "chars": len(extra_content),
+            })
+            extras.append(
+                f"## Источник {source_id}: {path}\n"
+                f"{self._fit(extra_content, per_extra_room)}"
+            )
+            if len(sources) >= MAX_EXTRA_PAGES + 1:
                 break
 
+        # Главная получает первый номер: ссылки вида «Источник 1» должны
+        # вести на неё, а не на первую попавшуюся внутреннюю страницу.
         unused = max(0, extra_room - sum(len(part) for part in extras))
-        parts = [self._fit(content, MAX_SITE_TEXT_LENGTH - menu_room - extra_room + unused)]
+        main_room = MAX_SITE_TEXT_LENGTH - menu_room - extra_room + unused
+        parts = [f"## Источник 1: {sources[0]['path']}\n{self._fit(content, main_room)}"]
         parts.extend(extras)
         if menu:
             parts.append(self._fit(menu, menu_room))
-        return "\n\n".join(part for part in parts if part)
+        return "\n\n".join(part for part in parts if part), sources
+
+    def collect_site_text(self, url: str) -> str:
+        """Текст главной плюс пара внутренних страниц, в пределах бюджета.
+
+        Одной главной страницы каталога не хватает: там только меню, поэтому
+        разбор выходил общим и не про конкретный товар.
+        """
+        text, _ = self.collect_site_evidence(url)
+        return text
 
     def generate_analysis_steps(self, site_text: str) -> List[str]:
         """
@@ -428,7 +479,8 @@ class SiteAnalyzer:
     def generate_final_analysis(
         self,
         intermediate_results: List[Dict[str, str]],
-        site_text: str
+        site_text: str,
+        sources: List[Dict] | None = None,
     ) -> Dict:
         """
         Генерирует финальный анализ сайта на основе промежуточных результатов.
@@ -458,19 +510,21 @@ class SiteAnalyzer:
             "Ответ строго в JSON со всеми полями:\n"
             "{\n"
             '  "brief_analysis": "краткий анализ сайта: кто продаёт, кому, чем цепляет; до 1500 знаков, markdown-список",\n'
+            '  "key_facts": [ {"fact": "короткий проверяемый факт со страницы", "source": N}, ... 5-8 фактов, где N — номер из заголовка «Источник N» ],\n'
             '  "ad_instructions": "пошаговая инструкция по созданию рекламных постов; до 1500 знаков, нумерованный список",\n'
             '  "ad_examples": [ {"title": "заголовок", "body": "текст объявления", "cta": "призыв к действию"}, ... ровно 3 примера ],\n'
             '  "comparison_table": {"columns": ["Сегмент", "Боль", "УТП", "Канал"], "rows": [["...", "...", "...", "..."], ... 4-6 строк]}\n'
             "}\n"
             "Не вставляй в ответ оригинальный текст сайта целиком: максимум одна цитата длиной до 200 знаков. "
-            "В rows и columns не переноси текст на новые строки."
+            "В rows и columns не переноси текст на новые строки. "
+            "Номер источника указывай только тот, который есть в заголовках «Источник N»; своих адресов не выдумывай."
         )
 
-        user_prompt = f"Контекст о сайте (фрагменты текста):\n{self._fit(site_text, 4000)}"
+        user_prompt = f"Контекст о сайте (фрагменты текста по источникам):\n{self._fit(site_text, 4000)}"
 
         response = self.llm_client.chat_json(system_prompt, user_prompt)
 
-        return self._normalize_final_analysis(response)
+        return self._normalize_final_analysis(response, sources)
 
     @staticmethod
     def _markdown_table_to_grid(text: str) -> Dict:
@@ -519,8 +573,92 @@ class SiteAnalyzer:
             "rows": clean_rows,
         }
 
+    @staticmethod
+    def _source_index(sources) -> Dict[str, Dict]:
+        """Индекс «номер страницы -> её адрес» из реально скачанного."""
+        index: Dict[str, Dict] = {}
+        for source in sources or []:
+            if isinstance(source, dict) and source.get("url"):
+                index[str(source.get("id"))] = source
+        return index
+
     @classmethod
-    def _normalize_final_analysis(cls, response: Dict) -> Dict:
+    def _resolve_source_reference(cls, value, index: Dict[str, Dict]) -> str:
+        """Номер источника -> адрес страницы из реестра.
+
+        Принимает «2», «Источник 2» и URL, который модель списала со страницы.
+        Ссылку, которой нет в реестре, возвращает как нераспознанную: выдуманная
+        ссылка в профессиональном отчёте хуже, чем её отсутствие.
+        """
+        if not index or value is None:
+            return ""
+
+        text = str(value).strip()
+        if not text:
+            return ""
+
+        digits = re.findall(r"\d+", text)
+        if len(digits) == 1:
+            source = index.get(digits[0])
+            if source:
+                return source["url"]
+
+        normalized = text.rstrip("/").lower()
+        for source in index.values():
+            if source["url"].rstrip("/").lower() == normalized:
+                return source["url"]
+
+        return SOURCE_REFERENCE_UNRESOLVED
+
+    @classmethod
+    def _normalize_key_facts(cls, value, sources) -> List[Dict]:
+        """Факты с привязкой к страницам, на которых их можно проверить."""
+        index = cls._source_index(sources)
+        if isinstance(value, str):
+            value = [line for line in value.splitlines() if line.strip()]
+        if not isinstance(value, list):
+            return []
+
+        facts: List[Dict] = []
+        for item in value:
+            if isinstance(item, dict):
+                fact = str(
+                    item.get("fact") or item.get("claim") or item.get("text") or ""
+                ).strip()
+                reference = item.get("source") or item.get("source_id") or item.get("источник")
+            else:
+                fact, reference = str(item).strip(), None
+            if not fact:
+                continue
+
+            url = cls._resolve_source_reference(reference, index)
+            entry = {"fact": fact, "source": url or SOURCE_REFERENCE_UNRESOLVED}
+            if url and url in {source["url"] for source in index.values()}:
+                entry["page"] = next(
+                    source["path"] for source in index.values() if source["url"] == url
+                )
+            facts.append(entry)
+        return facts
+
+    @staticmethod
+    def _sources_table(sources) -> Dict:
+        """Реестр прочитанных страниц как таблица отчёта."""
+        if not sources:
+            return {}
+        rows = [
+            [str(source["id"]), source["url"], source.get("title") or "", str(source["chars"])]
+            for source in sources
+            if isinstance(source, dict) and source.get("url")
+        ]
+        if not rows:
+            return {}
+        return {
+            "columns": ["№", "Адрес страницы", "Заголовок страницы", "Знаков текста"],
+            "rows": rows,
+        }
+
+    @classmethod
+    def _normalize_final_analysis(cls, response: Dict, sources=None) -> Dict:
         """Приводит ответ модели к форме, которую рисуют интерфейс и PDF.
 
         Без этого списка строк в ad_examples превращались в кашу, таблица
@@ -562,6 +700,16 @@ class SiteAnalyzer:
             # Пустая таблица в отчёте выглядит как сломанный раздел.
             result.pop("comparison_table", None)
 
+        key_facts = cls._normalize_key_facts(result.get("key_facts"), sources)
+        if key_facts:
+            result["key_facts"] = key_facts
+        else:
+            result.pop("key_facts", None)
+
+        sources_table = cls._sources_table(sources)
+        if sources_table:
+            result["sources"] = sources_table
+
         return result
 
     def analyze_site(self, url: str) -> Dict:
@@ -581,9 +729,9 @@ class SiteAnalyzer:
         Raises:
             Exception: При ошибке на любом этапе анализа
         """
-        # Шаг 1-2: скачиваем главную и пару внутренних страниц, приводим к
-        # структурированному тексту в пределах бюджета.
-        site_text = self.collect_site_text(url)
+        # Шаг 1-2: скачиваем главную и внутренние страницы, приводим к
+        # структурированному тексту в пределах бюджета и запоминаем, что читали.
+        site_text, sources = self.collect_site_evidence(url)
 
         if not site_text or len(site_text) < 100:
             raise Exception("Не удалось получить достаточное количество текста с сайта")
@@ -597,7 +745,7 @@ class SiteAnalyzer:
         intermediate_results = self.execute_analysis_steps(steps, site_text)
         
         # Шаг 5: Генерируем финальный анализ
-        final_analysis = self.generate_final_analysis(intermediate_results, site_text)
+        final_analysis = self.generate_final_analysis(intermediate_results, site_text, sources)
         
         # Формируем итоговый результат
         return {

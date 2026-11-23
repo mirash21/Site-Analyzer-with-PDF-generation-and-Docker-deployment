@@ -106,8 +106,22 @@ function isTableObject(value) {
   )
 }
 
+const URL_LIKE = /^https?:\/\/\S+$/i
+
+// Адрес из реестра источников должен открываться, а не переписываться глазами.
+function MaybeLink({ value }) {
+  if (typeof value === 'string' && URL_LIKE.test(value.trim())) {
+    return (
+      <a className={classes.a} href={value.trim()} target="_blank" rel="noopener noreferrer">
+        {value.trim()}
+      </a>
+    )
+  }
+  return <RichText>{value}</RichText>
+}
+
 function pickTitle(value) {
-  for (const key of ['title', 'heading', 'name', 'product', 'segment']) {
+  for (const key of ['title', 'heading', 'name', 'product', 'segment', 'fact']) {
     if (typeof value[key] === 'string' && value[key].trim()) return [key, value[key]]
   }
   return [null, null]
@@ -130,7 +144,11 @@ function TableView({ columns, rows }) {
             return (
               <tr className="report-tr" key={rowIndex}>
                 {cells.map((cell, cellIndex) => (
-                  <td className="report-td" key={cellIndex}>{String(cell ?? '')}</td>
+                  <td className="report-td" key={cellIndex}>
+                    {typeof cell === 'object' && cell !== null
+                      ? String(cell)
+                      : <MaybeLink value={cell ?? ''} />}
+                  </td>
                 ))}
               </tr>
             )
@@ -193,7 +211,9 @@ function StructuredValue({ value, depth = 0 }) {
           <div className="report-dl-row" key={key}>
             <dt className="report-dt">{labelFor(key)}</dt>
             <dd className="report-dd">
-              <StructuredValue value={item} depth={depth + 1} />
+              {typeof item === 'string' || typeof item === 'number'
+                ? <MaybeLink value={item} />
+                : <StructuredValue value={item} depth={depth + 1} />}
             </dd>
           </div>
         ))}
@@ -201,7 +221,7 @@ function StructuredValue({ value, depth = 0 }) {
     )
   }
 
-  return <RichText>{value}</RichText>
+  return <MaybeLink value={value} />
 }
 
 export default function RichText({ children, className = '' }) {

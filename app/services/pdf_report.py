@@ -144,10 +144,18 @@ def inline_markup(raw: str) -> str:
     text = INLINE_BOLD.sub(lambda m: f"<b>{m.group('text')}</b>", text)
     text = INLINE_ITALIC.sub(lambda m: f"<i>{m.group('text')}</i>", text)
     text = INLINE_CODE.sub(lambda m: f'<font face="Courier">{m.group("text")}</font>', text)
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Адрес из реестра источников: в PDF он должен открываться, а не переписываться
+    # глазами. Экранирование уже сделано, поэтому подставлять нечего.
+    whole = text.strip()
+    if BARE_URL.fullmatch(whole):
+        return f'<link href="{whole}" color="#4f46e5">{whole}</link>'
+    return text
 
 
 TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+BARE_URL = re.compile(r"https?://\S+")
 TABLE_DIVIDER = re.compile(r"^\s*\|?\s*:?-{2,}.*$")
 HEADING = re.compile(r"^(?P<level>#{1,6})\s+(?P<text>.+)$")
 BULLET = re.compile(r"^\s*[-*+]\s+(?P<text>.+)$")
@@ -287,6 +295,11 @@ def _label(key: Any) -> str:
         "weaknesses": "Слабые стороны",
         "recommendations": "Рекомендации",
         "comparison_table": "Сравнительная таблица",
+        "key_facts": "Ключевые факты и где их проверить",
+        "fact": "Факт",
+        "source": "Источник",
+        "page": "Страница",
+        "sources": "Прочитанные страницы",
         "table": "Таблица",
         "title": "Заголовок",
         "heading": "Заголовок",
