@@ -146,6 +146,20 @@ def test_business_facts_are_taken_out_of_markup_verbatim(analyzer):
     assert facts["prices"] == [4850, 12300], "«2007 года» и «AS9100» ценой стать не должны"
 
 
+def test_legal_entity_stops_before_requisites_and_extra_words(analyzer):
+    html = """
+    <html><body>
+    <p>Реквизиты: ООО Татинженер ИНН 1657012345 КПП 165701001</p>
+    <p>Партнёр: ООО Металл Трейд Групп Сервис Инжиниринг ОГРН 1071690000000</p>
+    </body></html>
+    """
+
+    entities = analyzer.extract_business_facts(html)["legal_entities"]
+
+    assert entities[0] == "ООО Татинженер", "реквизиты — не часть названия"
+    assert all(len(entity.split()) <= 4 for entity in entities), "название не растягивают на весь абзац"
+
+
 def test_business_facts_say_nothing_was_found(analyzer):
     html = "<html><body><p>Только текст без чисел и контактов</p></body></html>"
 
@@ -549,6 +563,7 @@ def test_one_ad_per_segment_is_reported_by_code(analyzer):
 
 
 def test_ads_are_capped_and_the_cut_is_reported(analyzer):
+    assert analyzer_module.MAX_AD_EXAMPLES == 12, "медиаплан на 40 объявлений не читают"
     plan = analyzer._normalize_campaign_plan({"ad_examples": [{"body": f"объявление {index}"} for index in range(20)]})
 
     assert len(plan["ad_examples"]) == analyzer_module.MAX_AD_EXAMPLES
@@ -623,6 +638,9 @@ def test_semantic_list_is_capped(analyzer):
         {"keyword_seeds": [f"купить товар {index}" for index in range(80)], "negative_keywords": ["скачать"]}
     )
 
+    # Число пинуют литералом: тест, сравнивающий список с той же констаной,
+    # не заметит, что лимит подняли до сотни фраз.
+    assert analyzer_module.MAX_KEYWORDS_PER_LIST == 25
     assert len(plan["keyword_seeds"]) == analyzer_module.MAX_KEYWORDS_PER_LIST
     assert plan["keyword_seeds"][0] == "купить товар 0"
 
@@ -699,7 +717,19 @@ def test_dozen_forms_of_a_number_all_come_out_one(analyzer):
     assert analyzer._positive_number(True) is None, "True — не цена клика"
 
 
+def test_platform_limits_are_the_published_ones(analyzer):
+    # Лимиты сверяют с правилами площадок литералом: иначе правка констаны
+    # («56» -> «560») остаётся невидимой для теста, который читает ту же констану.
+    assert analyzer_module.PLATFORM_LIMITS == {
+        "yandex": {"label": "Яндекс Директ", "title": 56, "body": 81},
+        "google": {"label": "Google Ads", "title": 30, "body": 90},
+        "vk": {"label": "VK Реклама", "title": 40, "body": 90},
+        "telegram": {"label": "Telegram Ads", "title": 0, "body": 160},
+    }
+
+
 def test_economics_counts_from_site_prices_not_from_the_models_guess(analyzer):
+    assert analyzer_module.TEST_CAMPAIGN_BUDGET == 18000, "бюджет теста пинуют литералом"
     facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [4850, 9200, 12300]}
 
     economics = analyzer._build_economics(

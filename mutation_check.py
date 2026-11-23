@@ -3,6 +3,10 @@
 Каждая мутация воспроизводит конкретный дефект, который чинил этот шаг:
 склейка текста в одну строку, обрезка посреди слова, меню вместо оффера,
 чужой отчёт по id, таблица «плоским» списком, неэкранированный HTML.
+Дальше — то, что появлялось вместе с профессиональным отчётом: выдуманный
+адрес источника, телефон в восьми форматах, каталог вместо контактов,
+семантика без потолка и пересечения с минус-словами, объявление длиннее
+лимита площадки, средний чек из догадки вместо цен сайта.
 """
 
 import subprocess
@@ -40,8 +44,8 @@ MUTATIONS = [
     (
         "analyzer: внутренние страницы без бюджета (лимит выключен)",
         "app/services/analyzer.py",
-        '            extras.append(f"## Страница {path}\\n{self._fit(extra_content, per_extra_room)}")',
-        '            extras.append(f"## Страница {path}\\n{extra_content}")',
+        '                f"{self._fit(extra_content, per_extra_room)}"',
+        '                f"{extra_content}"',
     ),
     (
         "analyzer: markdown-таблица остаётся текстом",
@@ -52,8 +56,8 @@ MUTATIONS = [
     (
         "analyzer: пример объявления не разложен на заголовок и текст",
         "app/services/analyzer.py",
-        "                    lines = [line.strip() for line in item.splitlines() if line.strip()]",
-        "                    lines = [item.strip()] if item.strip() else []",
+        "                lines = [line.strip() for line in item.splitlines() if line.strip()]",
+        "                lines = [item.strip()] if item.strip() else []",
     ),
     (
         "analyzer: ответ не-объект принимается молча",
@@ -78,6 +82,133 @@ MUTATIONS = [
         "app/services/pdf_report.py",
         '    text = escape(str(raw if raw is not None else ""))',
         '    text = str(raw if raw is not None else "")',
+    ),
+    # --- механизмы, добавленные после переделки отчёта ---------------------
+    (
+        "analyzer: выдуманный адрес источника принимается за настоящий",
+        "app/services/analyzer.py",
+        "        return SOURCE_REFERENCE_UNRESOLVED",
+        "        return text",
+    ),
+    (
+        "analyzer: страницы в тексте без номеров реестра",
+        "app/services/analyzer.py",
+        '                f"## Источник {source_id}: {path}\\n"',
+        '                f"## Страница: {path}\\n"',
+    ),
+    (
+        "analyzer: телефон не нормализуется (каждый в своём формате)",
+        "app/services/analyzer.py",
+        '        return f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:]}"',
+        "        return digits",
+    ),
+    (
+        "analyzer: маска номера сдвинута",
+        "app/services/analyzer.py",
+        '            if len(digits) != 11 or digits[0] not in "78":',
+        '            if len(digits) != 10:',
+    ),
+    (
+        "analyzer: юрлицо хватает реквизиты вместе с названием",
+        "app/services/analyzer.py",
+        "{{1,3}}[«»\\\"']?\"",
+        "{{1,9}}[«»\\\"']?\"",
+    ),
+    (
+        "analyzer: стоп-слов в названии юрлица нет, ИНН становится частью имени",
+        "app/services/analyzer.py",
+        "(?:(?!(?:{LEGAL_ENTITY_STOP_WORDS})\\b)[А-Яа-яЁёA-Za-z]",
+        "(?:[А-Яа-яЁёA-Za-z]",
+    ),
+    (
+        "analyzer: квота раздела отключена (каталог вытесняет контакты)",
+        "app/services/analyzer.py",
+        "            if taken >= MAX_PAGES_PER_SECTION:",
+        "            if taken >= MAX_PAGES_PER_SECTION * 20:",
+    ),
+    (
+        "analyzer: честный блок отдаёт на откуп модели",
+        "app/services/analyzer.py",
+        "        return cls._unique(cls._seed_data_gaps(facts) + list(model_gaps))",
+        "        return cls._unique(list(model_gaps))",
+    ),
+    (
+        "analyzer: порядок разделов — как его дала модель",
+        "app/services/analyzer.py",
+        "        ordered = {key: result[key] for key in REPORT_SECTION_ORDER if key in result}",
+        "        ordered = {}",
+    ),
+    (
+        "analyzer: список семантики не ограничен",
+        "app/services/analyzer.py",
+        '        seeds = cls._normalize_string_list(result.get("keyword_seeds"))[:MAX_KEYWORDS_PER_LIST]',
+        '        seeds = cls._normalize_string_list(result.get("keyword_seeds"))',
+    ),
+    (
+        "analyzer: фраза осталась и в семантике, и в минус-словах",
+        "app/services/analyzer.py",
+        "        seeds = [item for item in seeds if item.lower() not in excluded]",
+        "        seeds = list(seeds)",
+    ),
+    (
+        "analyzer: план кампании затирает нормализованный разбор",
+        "app/services/analyzer.py",
+        "        result = {key: response[key] for key in CAMPAIGN_PLAN_KEYS if key in response}",
+        "        result = dict(response)",
+    ),
+    (
+        "analyzer: объявления не ограничены списком",
+        "app/services/analyzer.py",
+        "            if len(normalized) >= MAX_AD_EXAMPLES:",
+        "            if False:",
+    ),
+    (
+        "analyzer: площадка не опознаётся, лимит знаков не проверить",
+        "app/services/analyzer.py",
+        '        key = cls._match_platform(ad.get("platform"))',
+        '        key = ""',
+    ),
+    (
+        "analyzer: объявление молча обрезано под лимит вместо замечания",
+        "app/services/analyzer.py",
+        '            ad["limit_note"] = "; ".join(over) + " — сокращать до запуска"',
+        '            ad["title"] = (ad.get("title") or "")[: limits["title"] or None]',
+    ),
+    (
+        "analyzer: второй вариант на сегмент не требуют",
+        "app/services/analyzer.py",
+        "            if count < MIN_ADS_PER_SEGMENT:",
+        "            if count < 0:",
+    ),
+    (
+        "analyzer: средний чек взят из догадки, а не из цен сайта",
+        "app/services/analyzer.py",
+        "            avg_check = float(cls._median(prices))",
+        '            avg_check = cls._positive_number(response.get("avg_check")) or float(cls._median(prices))',
+    ),
+    (
+        "analyzer: True проходит как цена клика",
+        "app/services/analyzer.py",
+        "        if isinstance(value, bool):",
+        "        if isinstance(value, tuple):",
+    ),
+    (
+        "analyzer: незакрытый ответ модели не попал в честный блок",
+        "app/services/analyzer.py",
+        "                notes.append(missing_note)",
+        "                pass",
+    ),
+    (
+        "pdf: список фраз снова идёт пунктами по строке",
+        "app/services/pdf_report.py",
+        '    return str(key or "").strip().lower() in KEYWORD_LIST_KEYS and isinstance(value, list) and bool(value)',
+        "    return False",
+    ),
+    (
+        "pdf: адрес источника в отчёте нельзя открыть",
+        "app/services/pdf_report.py",
+        '    if BARE_URL.fullmatch(whole):',
+        '    if False:',
     ),
 ]
 
