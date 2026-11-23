@@ -27,10 +27,10 @@
   - Structured JSON-based analysis results
 
 - **📊 PDF Report Generation**
-  - Professional multi-page PDF reports with Cyrillic support
-  - Interactive detailed analysis exports
-  - Customizable branding and formatting
-  - html2canvas + jsPDF integration
+  - Server-side multi-page PDF reports (ReportLab) with Cyrillic support
+  - Real text and tables: selectable, searchable, paginated by the layout engine
+  - Print stylesheet as a one-click alternative ("Печать / PDF") in the browser
+  - Download endpoint: `GET /api/history/analysis/{id}/pdf`
 
 - **👥 User Management**
   - Secure JWT-based authentication
@@ -354,10 +354,11 @@ Site-Analyzer/
 │   │   │   ├── HistoryPanel.jsx
 │   │   │   ├── AdminPanel.jsx
 │   │   │   ├── ResultCard.jsx
+│   │   │   ├── RichText.jsx
 │   │   │   └── Loader.jsx
 │   │   ├── utils/
-│   │   │   ├── pdfGenerator.js
-│   │   │   └── detailedPdfGenerator.js
+│   │   │   ├── pdfDownload.js
+│   │   │   └── labels.js
 │   │   ├── config.js
 │   │   └── App.jsx
 │   ├── nginx.conf             # Production Nginx config
@@ -390,10 +391,10 @@ Site-Analyzer/
 - Check LLM API key is valid
 - Verify backend container is running
 
-**3. PDF Generation fails**
-- Ensure JavaScript is enabled
-- Check browser console for errors
-- Verify jsPDF and html2canvas are loaded
+**3. PDF download fails**
+- The PDF is built on the server: check `docker logs site-analyzer-backend`
+- Cyrillic needs the DejaVu font inside the backend image (`fonts-dejavu-core`)
+- The endpoint answers 500 with a readable reason; printing needs no server
 
 **4. Container won't start**
 - Check Docker logs: `docker-compose logs`
