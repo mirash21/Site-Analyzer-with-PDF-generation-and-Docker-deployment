@@ -84,6 +84,36 @@ PRICE_PATTERN = re.compile(r"(\d[\d\s\u00a0]{0,9})\s*(?:руб(?:\.|лей)?\b|�
 MIN_PLAUSIBLE_PRICE = 10
 MAX_PLAUSIBLE_PRICE = 100_000_000
 
+# Порядок разделов отчёта: сначала то, что клиент узнает про свой сайт,
+# потом рекламные выводы, затем цифры и честно — чего не хватает.
+REPORT_SECTION_ORDER = (
+    "brief_analysis",
+    "key_facts",
+    "comparison_table",
+    "site_gaps",
+    "ad_instructions",
+    "keyword_seeds",
+    "negative_keywords",
+    "ad_examples",
+    "economics_table",
+    "economics_assumptions",
+    "risks_and_checks",
+    "data_gaps",
+    "data_coverage",
+    "raw_site_data",
+    "sources",
+)
+
+# Эти строки считает код, а не модель: отсутствие цен на сайте — факт
+# разбора, и в отчёте оно обязано быть, даже если модель ответила красиво.
+DATA_GAP_LABELS = {
+    "prices": "Цен на прочитанных страницах нет — нужен прайс от клиента",
+    "phones": "Телефонов на прочитанных страницах нет — проверить раздел «Контакты»",
+    "emails": "Почты на прочитанных страницах нет",
+    "legal_entities": "Юридическое лицо на сайте не указано — для рекламы это риск",
+    "requisites": "Реквизитов (ИНН/ОГРН) не найдено — проверить раздел «О компании»",
+}
+
 
 class SiteAnalyzer:
     def __init__(self, llm_client: LLMClient):
@@ -700,11 +730,15 @@ class SiteAnalyzer:
             '  "key_facts": [ {"fact": "короткий проверяемый факт со страницы", "source": N}, ... 5-8 фактов, где N — номер из заголовка «Источник N» ],\n'
             '  "ad_instructions": "пошаговая инструкция по созданию рекламных постов; до 1500 знаков, нумерованный список",\n'
             '  "ad_examples": [ {"title": "заголовок", "body": "текст объявления", "cta": "призыв к действию"}, ... ровно 3 примера ],\n'
-            '  "comparison_table": {"columns": ["Сегмент", "Боль", "УТП", "Канал"], "rows": [["...", "...", "...", "..."], ... 4-6 строк]}\n'
+            '  "comparison_table": {"columns": ["Сегмент", "Боль", "УТП", "Канал"], "rows": [["...", "...", "...", "..."], ... 4-6 строк]},\n'
+            '  "site_gaps": ["что на сайте мешает конверсии — 3-6 пунктов, только то, что видно на прочитанных страницах"],\n'
+            '  "risks_and_checks": ["что проверить перед запуском: дилерские права, товарные знаки брендов, актуальность сертификатов, сроки поставки — 3-6 пунктов"],\n'
+            '  "data_gaps": ["каких данных на сайте нет и потому нет в отчёте — 2-5 пунктов"],\n'
             "}\n"
             "Не вставляй в ответ оригинальный текст сайта целиком: максимум одна цитата длиной до 200 знаков. "
             "В rows и columns не переноси текст на новые строки. "
-            "Номер источника указывай только тот, который есть в заголовках «Источник N»; своих адресов не выдумывай."
+            "Номер источника указывай только тот, который есть в заголовках «Источник N»; своих адресов не выдумывай. "
+            "Если данных нет — честно пиши об этом в data_gaps, не заменяя их догадками."
         )
 
         user_prompt = f"Контекст о сайте (фрагменты текста по источникам):\n{self._fit(site_text, 4000)}"
@@ -845,6 +879,49 @@ class SiteAnalyzer:
         }
 
     @classmethod
+    def _normalize_string_list(cls, value) -> List[str]:
+        """Список пунктов из того, что реально может вернуть модель.
+
+        Модель отдаёт то markdown-список, то одну строку через переносы, то
+        список объектов — интерфейс же ждёт ровно список строк.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            items: List = value.splitlines()
+        elif isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            items = [value]
+
+        cleaned: List[str] = []
+        for item in items:
+            if isinstance(item, dict):
+                item = next((found for found in item.values() if isinstance(found, str) and found.strip()), "")
+            text = re.sub(r"^\s*(?:[-*+]|\d{1,3}[.)])\s*", "", str(item or "")).strip()
+            if text:
+                cleaned.append(text)
+        return cls._unique(cleaned)
+
+    @classmethod
+    def _seed_data_gaps(cls, facts) -> List[str]:
+        """Чего не хватает — по факту разбора, а не по желанию модели."""
+        facts = facts or {}
+        return [label for key, label in DATA_GAP_LABELS.items() if not facts.get(key)]
+
+    @classmethod
+    def _merge_data_gaps(cls, model_gaps: List[str], facts) -> List[str]:
+        return cls._unique(cls._seed_data_gaps(facts) + list(model_gaps))
+
+    @staticmethod
+    def _order_sections(result: Dict) -> Dict:
+        """Разделы отчёта идут в порядке чтения, а не в порядке фантазии модели."""
+        ordered = {key: result[key] for key in REPORT_SECTION_ORDER if key in result}
+        for key, value in result.items():
+            ordered.setdefault(key, value)
+        return ordered
+
+    @classmethod
     def _normalize_final_analysis(cls, response: Dict, sources=None, facts=None) -> Dict:
         """Приводит ответ модели к форме, которую рисуют интерфейс и PDF.
 
@@ -905,7 +982,21 @@ class SiteAnalyzer:
             if any(facts.get(key) for key in ("phones", "emails", "legal_entities", "requisites", "prices")):
                 result["raw_site_data"] = cls.render_business_facts(facts)
 
-        return result
+        for key in ("site_gaps", "risks_and_checks", "data_gaps"):
+            values = cls._normalize_string_list(result.get(key))
+            if values:
+                result[key] = values
+            else:
+                result.pop(key, None)
+
+        if facts is not None:
+            # Отсутствие цен на сайте — вывод кода, а не модели: без этого
+            # честный раздел мог «забыться» в любом удачном ответе.
+            merged = cls._merge_data_gaps(result.get("data_gaps", []), facts)
+            if merged:
+                result["data_gaps"] = merged
+
+        return cls._order_sections(result)
 
     def analyze_site(self, url: str) -> Dict:
         """

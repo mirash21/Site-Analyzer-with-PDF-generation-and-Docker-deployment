@@ -186,6 +186,70 @@ def test_report_carries_coverage_and_verbatim_data(analyzer):
     assert "4 850" in normalized["raw_site_data"]
 
 
+def test_string_lists_survive_every_shape_the_model_gives(analyzer):
+    assert analyzer._normalize_string_list("- нет цен\n2. один призыв к действию\n") == [
+        "нет цен",
+        "один призыв к действию",
+    ]
+    assert analyzer._normalize_string_list([{"risk": "прайс неактуален"}, "прайс неактуален"]) == [
+        "прайс неактуален"
+    ]
+    assert analyzer._normalize_string_list(None) == []
+    assert analyzer._normalize_string_list("  ") == []
+
+
+def test_missing_prices_are_reported_by_code_not_by_model(analyzer):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "T", "chars": 2000}]
+    facts = {"phones": ["+7 (843) 200-11-22"], "emails": ["a@b.ru"], "legal_entities": ["ООО «Т»"], "requisites": [], "prices": []}
+
+    normalized = analyzer._normalize_final_analysis({"brief_analysis": "разбор"}, sources, facts)
+
+    gaps = "\n".join(normalized["data_gaps"])
+    assert "Цен" in gaps and "Реквизитов" in gaps
+    assert "Телефонов" not in gaps and "Почты" not in gaps, "найденное не числится пропавшим"
+
+    # Модель не освобождает от честного блока: её пункты добавляются к кодовым.
+    normalized = analyzer._normalize_final_analysis(
+        {"data_gaps": ["Нет кейсов по отраслям"]}, sources, facts
+    )
+    assert "Нет кейсов по отраслям" in normalized["data_gaps"]
+    assert normalized["data_gaps"].index("Нет кейсов по отраслям") > 0
+
+
+def test_sections_come_out_in_reading_order(analyzer):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "T", "chars": 2000}]
+
+    normalized = analyzer._normalize_final_analysis(
+        {
+            "sources": {"columns": ["№"], "rows": [["1"]]},
+            "ad_examples": [{"title": "t", "body": "b"}],
+            "brief_analysis": "разбор",
+            "comparison_table": {"columns": ["Сегмент"], "rows": [["Технологи"]]},
+            "risks_and_checks": ["проверить дилерские права"],
+            "kakoi_to_novyi_klyuch": "модель выдумала поле",
+        },
+        sources,
+        {"phones": ["+7 (843) 200-11-22"], "prices": [100]},
+    )
+
+    keys = list(normalized)
+    assert keys.index("brief_analysis") < keys.index("comparison_table") < keys.index("risks_and_checks")
+    assert keys.index("risks_and_checks") < keys.index("data_gaps") < keys.index("sources")
+    # Неизвестное поле не выбрасывается, но и в начало не лезет.
+    assert keys[-1] == "kakoi_to_novyi_klyuch"
+
+
+def test_prompt_asks_for_risks_and_honest_gaps(analyzer):
+    analyzer.generate_final_analysis(
+        [{"step_number": 1, "step": "шаг", "result": "ответ"}], "текст", [{"id": 1, "url": "u", "path": "/", "chars": 1}]
+    )
+    system_prompt = analyzer.llm_client.prompts("chat_json")[-1][1]
+
+    for field in ('"site_gaps"', '"risks_and_checks"', '"data_gaps"'):
+        assert field in system_prompt
+    assert "не заменяя их догадками" in system_prompt
+
+
 def test_fit_cuts_on_line_boundary(analyzer):
     text = "первая строка\nвторая строка\nтретья строка"
     fitted = analyzer._fit(text, 30)
