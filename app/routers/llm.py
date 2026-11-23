@@ -2,12 +2,13 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, HttpUrl
 import os
 from sqlalchemy.orm import Session
-from app.services.llm_client import LLMClient
+from app.services.llm_client import DEFAULT_MODEL, LLMClient, LLMUnavailableError
 from app.services.analyzer import SiteAnalyzer
 from app.services.auth import get_current_active_user
 from app.services.logger import log_site_analysis
 from app.models.models import User
 from app.database import get_db
+from app.rate_limit import limiter
 
 router = APIRouter(prefix="/llm", tags=["LLM"])
 
@@ -18,7 +19,8 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not base_url or not api_key:
     raise ValueError("Не заданы переменные окружения OPENAI_API_BASE или OPENAI_API_KEY")
 
-llm_client = LLMClient(base_url=base_url, api_key=api_key)
+model = os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+llm_client = LLMClient(base_url=base_url, api_key=api_key, model=model)
 site_analyzer = SiteAnalyzer(llm_client=llm_client)
 
 
@@ -42,8 +44,10 @@ class AnalyzeRequest(BaseModel):
 
 
 @router.post("/chat")
-async def chat(
-    request: ChatRequest,
+@limiter.limit("30/minute")
+def chat(
+    request: Request,
+    body: ChatRequest,
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -56,15 +60,19 @@ async def chat(
         Текст ответа модели
     """
     try:
-        response = llm_client.chat(request.prompt)
+        response = llm_client.chat(body.prompt)
         return {"response": response}
+    except LLMUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/chat-with-system")
-async def chat_with_system(
-    request: ChatWithSystemRequest,
+@limiter.limit("30/minute")
+def chat_with_system(
+    request: Request,
+    body: ChatWithSystemRequest,
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -77,15 +85,19 @@ async def chat_with_system(
         Текст ответа модели
     """
     try:
-        response = llm_client.chat_with_system(request.system_prompt, request.user_prompt)
+        response = llm_client.chat_with_system(body.system_prompt, body.user_prompt)
         return {"response": response}
+    except LLMUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/chat-json")
-async def chat_json(
-    request: ChatJsonRequest,
+@limiter.limit("30/minute")
+def chat_json(
+    request: Request,
+    body: ChatJsonRequest,
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -98,15 +110,19 @@ async def chat_json(
         Словарь с парсированным JSON-ответом
     """
     try:
-        response = llm_client.chat_json(request.system_prompt, request.user_prompt)
+        response = llm_client.chat_json(body.system_prompt, body.user_prompt)
         return {"response": response}
+    except LLMUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/analyze-site")
-async def analyze_site(
-    request: AnalyzeRequest,
+@limiter.limit("10/hour")
+def analyze_site(
+    request: Request,
+    body: AnalyzeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ) -> dict:
@@ -133,17 +149,26 @@ async def analyze_site(
 
     Raises:
         HTTPException 400: Если не удалось скачать или распарсить сайт
+        HTTPException 503: Если LLM-сервис не ответил (сетевой сбой)
         HTTPException 500: При внутренней ошибке обработки
     """
     try:
-        result = site_analyzer.analyze_site(request.url)
+        result = site_analyzer.analyze_site(body.url)
         
         # Сохранение анализа в базу данных
-        log_site_analysis(current_user.id, request.url, result, db)
+        log_site_analysis(current_user.id, body.url, result, db)
         
         return result
+    except LLMUnavailableError as e:
+        # LLM-прокси недоступен: это не вина пользователя и не повторять вслепую
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         error_msg = str(e)
-        if "не удалось скачать" in error_msg.lower() or "не удалось распарсить" in error_msg.lower():
+        # SSRF-защита и ошибки загрузки/парсинга — это ошибки клиента (400)
+        if any(kw in error_msg.lower() for kw in (
+            "не удалось скачать", "не удалось распарсить",
+            "запрещён", "внутреннему адресу", "учётные данные",
+            "допускаются только", "некорректный url", "разрешить хост"
+        )):
             raise HTTPException(status_code=400, detail=error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
