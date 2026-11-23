@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import Loader from './Loader'
 import ResultCard from './ResultCard'
+import RichText from './RichText'
 import HistoryPanel from './HistoryPanel'
 import AdminPanel from './AdminPanel'
 import { API_BASE_URL } from '../config'
@@ -47,14 +48,14 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
   const isAdmin = user?.role === 'admin' || user?.role === 'frontend_dev'
 
   return (
-    <div className="min-h-screen py-8 px-4">
-      <div className="max-w-[800px] mx-auto">
+    <div className="min-h-screen py-8 px-4 print-wide">
+      <div className="max-w-[800px] mx-auto print-wide">
         {/* Header with user info */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6 }}
-          className="flex justify-between items-center mb-12"
+          className="flex justify-between items-center mb-12 no-print"
         >
           <div>
             <h1 className="text-5xl md:text-6xl font-bold mb-2 bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
@@ -84,7 +85,7 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             onClick={() => setShowAdmin(!showAdmin)}
-            className={`w-full mb-4 px-6 py-3 rounded-lg text-white font-semibold transition-all ${
+            className={`no-print w-full mb-4 px-6 py-3 rounded-lg text-white font-semibold transition-all ${
               showAdmin
                 ? 'bg-red-500/20 border border-red-500/50 text-red-300'
                 : 'bg-gradient-to-r from-red-500 to-pink-600'
@@ -103,7 +104,7 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
               onClick={() => setShowHistory(!showHistory)}
-              className="w-full mb-6 px-6 py-3 rounded-lg bg-white/5 backdrop-blur-sm border border-white/10 text-white hover:bg-white/10 transition-all"
+              className="no-print w-full mb-6 px-6 py-3 rounded-lg bg-white/5 backdrop-blur-sm border border-white/10 text-white hover:bg-white/10 transition-all"
             >
               {showHistory ? '← Вернуться к анализу' : '📜 История анализов'}
             </motion.button>
@@ -123,7 +124,7 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.6, delay: 0.2 }}
                   onSubmit={onSubmit}
-                  className="mb-12"
+                  className="mb-12 no-print"
                 >
               <div className="flex flex-col sm:flex-row gap-4">
                 <input
@@ -144,14 +145,18 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
             </motion.form>
 
             {/* Loader */}
-            {analyzing && <Loader />}
+            {analyzing && (
+              <div className="no-print">
+                <Loader />
+              </div>
+            )}
 
             {/* Error */}
             {error && (
               <motion.div
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="mb-8 p-6 bg-red-500/20 backdrop-blur-sm border border-red-500/50 rounded-xl text-red-200"
+                className="no-print mb-8 p-6 bg-red-500/20 backdrop-blur-sm border border-red-500/50 rounded-xl text-red-200"
               >
                 <p className="font-semibold mb-2">Ошибка</p>
                 <p>{error}</p>
@@ -161,6 +166,7 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
             {/* Results */}
             {result && (
               <motion.div
+                id="report-root"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ duration: 0.5 }}
@@ -177,69 +183,65 @@ function Dashboard({ user, url, setUrl, analyzing, error, result, setResult, onS
                   <p className="text-lg font-medium text-blue-400 break-all">{result.url}</p>
                 </motion.div>
 
-                {/* Steps */}
-                {result.steps && result.steps.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.5, delay: 0.2 }}
-                  >
-                    <h2 className="text-2xl font-bold mb-4 text-gray-100">Шаги анализа</h2>
-                    <div className="space-y-3">
-                      {result.steps.map((step, index) => (
-                        <motion.div
-                          key={index}
-                          initial={{ opacity: 0, x: -20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ duration: 0.3, delay: 0.3 + index * 0.1 }}
-                          className="p-4 bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl hover:bg-white/10 transition-all"
-                        >
-                          <p className="text-gray-200">
-                            <span className="text-purple-400 font-semibold">{index + 1}. </span>
-                            {step}
-                          </p>
-                        </motion.div>
-                      ))}
-                    </div>
-                  </motion.div>
-                )}
-
-                {/* Intermediate Results */}
-                {result.intermediate_results && result.intermediate_results.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.5, delay: 0.4 }}
-                  >
-                    <h2 className="text-2xl font-bold mb-4 text-gray-100">Промежуточные результаты</h2>
-                    <div className="space-y-4">
-                      {result.intermediate_results.map((item, index) => (
-                        <motion.div
-                          key={index}
-                          initial={{ opacity: 0, x: -20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ duration: 0.3, delay: 0.5 + index * 0.1 }}
-                          className="p-5 bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl"
-                        >
-                          <p className="text-sm text-purple-400 font-semibold mb-3">Шаг {item.step_number}</p>
-                          <p className="text-sm text-gray-400 mb-2">{item.step}</p>
-                          <p className="text-gray-200 whitespace-pre-wrap">{item.result}</p>
-                        </motion.div>
-                      ))}
-                    </div>
-                  </motion.div>
-                )}
-
-                {/* Final Analysis */}
+                {/* Итоговый анализ идёт первым: это то, ради чего открывают отчёт. */}
                 {result.final_analysis && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.5, delay: 0.6 }}
-                  >
+                  <div>
                     <h2 className="text-2xl font-bold mb-4 text-gray-100">Итоговый анализ</h2>
-                    <ResultCard data={result.final_analysis} delay={0.7} url={result.url} fullAnalysisData={result} />
-                  </motion.div>
+                    <ResultCard
+                      data={result.final_analysis}
+                      delay={0.7}
+                      url={result.url}
+                      fullAnalysisData={result}
+                      analysisId={result.id}
+                    />
+                  </div>
+                )}
+
+                {/* Служебные секции свёрнуты: ~30 KB markdown промежуточных
+                    ответов делали отчёт нечитаемым. В печать кнопка экспорта
+                    разворачивает их автоматически. */}
+                {(result.steps?.length > 0 || result.intermediate_results?.length > 0) && (
+                  <details className="analysis-card p-5 bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl">
+                    <summary className="cursor-pointer text-lg font-semibold text-gray-100">
+                      Как получен результат: шаги и промежуточные ответы
+                    </summary>
+
+                    {result.steps?.length > 0 && (
+                      <div className="mt-5">
+                        <h3 className="text-base font-semibold text-purple-300 mb-3">Шаги анализа</h3>
+                        <ol className="space-y-2">
+                          {result.steps.map((step, index) => (
+                            <li key={index} className="report-li text-gray-200">
+                              <span className="text-purple-400 font-semibold">{index + 1}. </span>
+                              <RichText>{step}</RichText>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {result.intermediate_results?.length > 0 && (
+                      <div className="mt-6 space-y-4">
+                        <h3 className="text-base font-semibold text-purple-300 mb-3">
+                          Промежуточные результаты
+                        </h3>
+                        {result.intermediate_results.map((item, index) => (
+                          <div
+                            key={index}
+                            className="analysis-card p-4 rounded-xl border border-white/10 bg-white/5"
+                          >
+                            <p className="text-sm text-purple-400 font-semibold mb-1">
+                              Шаг {item.step_number}
+                            </p>
+                            {item.step && (
+                              <p className="text-sm text-gray-400 mb-3">{item.step}</p>
+                            )}
+                            <RichText>{item.result}</RichText>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </details>
                 )}
               </motion.div>
             )}
