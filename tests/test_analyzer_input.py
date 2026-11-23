@@ -688,6 +688,83 @@ def test_failed_campaign_plan_does_not_lose_the_report(analyzer, monkeypatch):
     assert any("Семантика" in gap for gap in result["final_analysis"]["data_gaps"])
 
 
+def test_dozen_forms_of_a_number_all_come_out_one(analyzer):
+    assert analyzer._positive_number("38,5 ₽") == 38.5
+    assert analyzer._positive_number("от 40 рублей") == 40
+    assert analyzer._positive_number(40) == 40
+    assert analyzer._positive_number(None) is None
+    assert analyzer._positive_number("нет данных") is None
+    assert analyzer._positive_number(0) is None
+    assert analyzer._positive_number(-5) is None
+    assert analyzer._positive_number(True) is None, "True — не цена клика"
+
+
+def test_economics_counts_from_site_prices_not_from_the_models_guess(analyzer):
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [4850, 9200, 12300]}
+
+    economics = analyzer._build_economics(
+        {"cpc": 40, "conversion_rate": 3, "margin": 25, "avg_check": 999999}, facts
+    )
+    rows = {row[0]: row for row in economics["economics_table"]["rows"]}
+
+    assert rows["Средний чек"][1] == "9 200 ₽", "средний чек берут из цен сайта, а не из фантазии"
+    assert "медиана" in rows["Средний чек"][2]
+    assert rows["Кликов"][1] == "450"
+    assert rows["Заявок"][1] == "13"
+    assert rows["Цена заявки (CPL)"][1] == "1 384 ₽"
+    assert rows["Прибыль с продажи"][1] == "2 300 ₽"
+    assert rows["Продаж для окупаемости"][1] == "8"
+
+
+def test_economics_admits_that_the_site_has_no_prices(analyzer):
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": []}
+
+    economics = analyzer._build_economics(
+        {"cpc": 50, "conversion_rate": None, "margin": 20, "avg_check": 30000}, facts
+    )
+    rows = {row[0]: row for row in economics["economics_table"]["rows"]}
+
+    assert rows["Средний чек"][1] == "30 000 ₽"
+    assert "оценка модели" in rows["Средний чек"][2], "догадку подписывают как догадку"
+    assert rows["Заявок"][1] == analyzer_module.NO_DATA
+    assert rows["Цена заявки (CPL)"][1] == analyzer_module.NO_DATA
+    assert any("прайс" in line for line in economics["economics_assumptions"])
+
+
+def test_economics_prompt_fixes_the_budget_and_asks_only_for_assumptions(analyzer):
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [100]}
+
+    analyzer.generate_economics([{"step_number": 1, "step": "шаг", "result": "ответ"}], "текст", facts)
+    _, system_prompt, _ = analyzer.llm_client.calls[-1]
+
+    assert "18 000" in system_prompt
+    assert '"cpc"' in system_prompt and '"avg_check"' in system_prompt
+    assert "ставь null" in system_prompt
+    assert "Их считает код" in system_prompt or "их считает код" in system_prompt
+    assert len(system_prompt) < 3000
+
+
+def test_missing_economics_is_reported_instead_of_invented(analyzer, monkeypatch):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": []}
+    monkeypatch.setattr(
+        analyzer, "collect_site_evidence", lambda url: ("структурированный текст сайта " * 10, sources, facts)
+    )
+    monkeypatch.setattr(analyzer, "generate_analysis_steps", lambda text: ["Выделить сегменты"])
+
+    def broken_economics(*args, **kwargs):
+        raise Exception("таймаут")
+
+    monkeypatch.setattr(analyzer, "generate_economics", broken_economics)
+    analyzer.llm_client.answers = {"chat_json": {"steps": ["Выделить сегменты"], "brief_analysis": "разбор"}}
+
+    result = analyzer.analyze_site("https://tateng.ru/")
+
+    assert result["final_analysis"]["brief_analysis"] == "разбор"
+    assert "economics_table" not in result["final_analysis"]
+    assert any("Экономика" in gap for gap in result["final_analysis"]["data_gaps"])
+
+
 def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
     facts = {"phones": ["+7 843 200 11 22"], "emails": [], "legal_entities": [], "requisites": [], "prices": [1200]}
@@ -725,3 +802,6 @@ def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     assert result["final_analysis"]["negative_keywords"] == ["скачать", "бесплатно"]
     keys = list(result["final_analysis"])
     assert keys.index("ad_instructions") < keys.index("keyword_seeds") < keys.index("negative_keywords")
+    # Экономика — третий ответ модели, и он тоже доезжает до отчёта.
+    assert result["final_analysis"]["economics_table"]["columns"] == ["Показатель", "Значение", "Откуда"]
+    assert keys.index("negative_keywords") < keys.index("economics_table")

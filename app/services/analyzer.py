@@ -79,6 +79,12 @@ UNKNOWN_PLATFORM = "площадка не указана"
 MIN_ADS_PER_SEGMENT = 2
 MAX_AD_EXAMPLES = 12
 
+# Экономика тестовой кампании: бюджет фиксирован, арифметику считает код.
+# Модель обязана назвать только допущения: иначе в отчёте появляется
+# «средний чек 250 000 ₽» там, где на сайте не указано ни одной цены.
+TEST_CAMPAIGN_BUDGET = 18000
+NO_DATA = "нет данных"
+
 # Модель ссылается на страницы только номерами: адрес она обязана взять из
 # реестра, а не сочинять. Не распознанный номер факт не теряет, но помечается.
 SOURCE_REFERENCE_UNRESOLVED = "источник не распознан"
@@ -819,6 +825,50 @@ class SiteAnalyzer:
 
         return self._normalize_campaign_plan(response)
 
+    def generate_economics(
+        self,
+        intermediate_results: List[Dict[str, str]],
+        site_text: str,
+        facts: Dict | None = None,
+    ) -> Dict:
+        """Цифры кампании: модель называет допущения, итог считает код.
+
+        Так в отчёте остаётся прослеживаемость: видно, какая цифра взята со
+        страницы, какая предложена как допущение и по какой формуле получена.
+        """
+        facts = facts or {}
+        literal = self.render_business_facts(facts)
+        results_str = "\n\n".join(
+            f"Шаг {r['step_number']}: {r['step']}\nРезультат: {self._fit(r['result'], 900)}"
+            for r in intermediate_results
+        )
+
+        system_prompt = (
+            "Ты медиапланер. Оцени экономику тестовой кампании этого сайта. "
+            f"Бюджет теста фиксированный: {self._money(TEST_CAMPAIGN_BUDGET)} ₽ — считать по нему. "
+            "Итоги не выводи, их считает код: тебе нужны только допущения.\n\n"
+            f"{literal}\n\n"
+            "Ответ строго в JSON со всеми полями:\n"
+            "{\n"
+            '  "cpc": цена клика в рублях — число,\n'
+            '  "conversion_rate": конверсия сайта в заявку в процентах — число,\n'
+            '  "margin": наценка в процентах от цены — число,\n'
+            '  "avg_check": средний чек в рублях — число или null,\n'
+            '  "notes": ["что ещё учесть при запуске — 2-4 коротких пункта"]\n'
+            "}\n"
+            "Если на страницах есть цены — avg_check оставь null: средний чек возьмут из них. "
+            "Не знаешь значения — ставь null, угаданное число в медиаплане стоит денег."
+        )
+
+        user_prompt = (
+            f"Результаты анализа:\n{self._fit(results_str, 2500)}\n\n"
+            f"Фрагменты текста сайта:\n{self._fit(site_text, 1500)}"
+        )
+
+        response = self.llm_client.chat_json(system_prompt, user_prompt)
+
+        return self._build_economics(response, facts)
+
     @staticmethod
     def _markdown_table_to_grid(text: str) -> Dict:
         """Превращает markdown-таблицу в {columns, rows}.
@@ -1102,6 +1152,93 @@ class SiteAnalyzer:
             else:
                 result.pop(key, None)
 
+    @staticmethod
+    def _positive_number(value) -> float | None:
+        """Число из любой формы, которую даёт модель: «38,5 ₽», 38, None.
+
+        Отрицательное или нулевое допущение ломает всю арифметику плана, поэтому
+        такое значение считается отсутствующим.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            text = str(value or "").replace("\u00a0", " ").replace(",", ".")
+            match = re.search(r"\d+(?:\.\d+)?", text)
+            if not match:
+                return None
+            number = float(match.group())
+        return number if number > 0 else None
+
+    @staticmethod
+    def _median(values: List[int]) -> int | None:
+        if not values:
+            return None
+        middle = len(values) // 2
+        if len(values) % 2:
+            return values[middle]
+        return int((values[middle - 1] + values[middle]) / 2)
+
+    @classmethod
+    def _build_economics(cls, response, facts: Dict | None = None) -> Dict:
+        """Считает план кампании по допущениям модели и ценам сайта."""
+        if not isinstance(response, dict):
+            raise Exception("LLM не вернула экономику кампании в формате JSON-объекта")
+
+        facts = facts or {}
+        budget = TEST_CAMPAIGN_BUDGET
+        cpc = cls._positive_number(response.get("cpc"))
+        conversion = cls._positive_number(response.get("conversion_rate"))
+        margin = cls._positive_number(response.get("margin"))
+
+        prices = sorted({int(value) for value in (facts.get("prices") or []) if isinstance(value, (int, float))})
+        if prices:
+            avg_check = float(cls._median(prices))
+            check_origin = f"медиана из {len(prices)} цен со страниц сайта"
+        else:
+            avg_check = cls._positive_number(response.get("avg_check"))
+            check_origin = (
+                "оценка модели — на прочитанных страницах цен нет" if avg_check else "цен на сайте нет, чек неизвестен"
+            )
+
+        clicks = int(budget // cpc) if cpc else None
+        leads = int(clicks * conversion / 100) if clicks and conversion else None
+        cpl = int(budget / leads) if leads else None
+        profit = int(avg_check * margin / 100) if avg_check and margin else None
+        payback = -(-budget // profit) if profit else None
+
+        def money(value):
+            return f"{cls._money(value)} ₽" if value else NO_DATA
+
+        rows = [
+            ["Бюджет теста", money(budget), "фиксирован в отчёте"],
+            ["Цена клика (CPC)", money(int(cpc)) if cpc else NO_DATA, "допущение модели — проверить в кабинете"],
+            ["Кликов", cls._money(clicks) if clicks else NO_DATA, "бюджет / CPC"],
+            ["Конверсия сайта", f"{conversion:g}%" if conversion else NO_DATA, "допущение модели"],
+            ["Заявок", cls._money(leads) if leads else NO_DATA, "клики × конверсия"],
+            ["Цена заявки (CPL)", money(cpl), "бюджет / заявки"],
+            ["Средний чек", money(int(avg_check)) if avg_check else NO_DATA, check_origin],
+            ["Наценка", f"{margin:g}%" if margin else NO_DATA, "допущение модели — уточнить у клиента"],
+            ["Прибыль с продажи", money(profit), "средний чек × наценка"],
+            ["Продаж для окупаемости", cls._money(payback) if payback else NO_DATA, "бюджет / прибыль с продажи"],
+        ]
+
+        assumptions = [
+            "Клики = бюджет / CPC; заявок = клики × конверсия; CPL = бюджет / заявок.",
+            "Окупаемость = бюджет / (средний чек × наценка). Конверсию заявки в договор "
+            "не учитывали: в B2B она заметно меньше единицы, реальный план ниже.",
+        ]
+        if not prices:
+            assumptions.append("Средний чек — допущение, а не факт: запросите у клиента прайс.")
+        assumptions.extend(cls._normalize_string_list(response.get("notes"))[:4])
+
+        result: Dict = {"economics_table": {"columns": ["Показатель", "Значение", "Откуда"], "rows": rows}}
+        unique_assumptions = cls._unique(assumptions)
+        if unique_assumptions:
+            result["economics_assumptions"] = unique_assumptions
+        return result
+
     @classmethod
     def _normalize_campaign_plan(cls, response: Dict) -> Dict:
         """План кампании: те же правила формы, что и для остального отчёта."""
@@ -1237,32 +1374,36 @@ class SiteAnalyzer:
         # Шаг 5: Генерируем финальный анализ
         final_analysis = self.generate_final_analysis(intermediate_results, site_text, sources, facts)
 
-        # Шаг 6: план кампании вторым запросом. В один JSON модель обрезалась
-        # на середине, а половина отчёта хуже двух целых ответов.
-        try:
-            campaign_plan = self.generate_campaign_plan(intermediate_results, site_text, facts)
-            # Замечания кода о креативах (нет второго варианта, неизвестная
-            # площадка) попадают в тот же честный блок, что и пропавшие данные,
-            # и не затирают его: план не знает, чего не хватало на сайте.
-            notes = campaign_plan.pop("coverage_notes", [])
-            campaign_plan.pop("data_gaps", None)
-            final_analysis = self._order_sections({**final_analysis, **campaign_plan})
-            if notes:
-                final_analysis["data_gaps"] = self._unique(
-                    list(final_analysis.get("data_gaps", [])) + notes
-                )
-        except Exception as exc:  # noqa: BLE001 - без плана отчёт всё равно полезен
-            # План не должен обнулять разбор сайта, но и молчать нельзя:
-            # читатель видит, что семантику собрали не мы.
-            for key in ("keyword_seeds", "negative_keywords", "ad_examples"):
-                # Эти поля принадлежат плану. Если модель вернула их же в первом
-                # ответе, они не нормализованы и в отчёте выглядят как мусор.
-                final_analysis.pop(key, None)
-            final_analysis.setdefault("data_gaps", []).append(
-                "Семантика и минус-слова не сгенерированы — их придётся подбирать вручную."
-            )
-            print(f"План кампании не собран: {exc}")
-        
+        # Шаг 6: дополнительные ответы модели. В один JSON она обрезалась на
+        # середине, а половина отчёта хуже двух целых ответов: план кампании и
+        # экономика идут отдельными запросами.
+        extras = (
+            ("план кампании", self.generate_campaign_plan, ("ad_examples", "keyword_seeds", "negative_keywords"),
+             "Семантика и минус-слова не сгенерированы — их придётся подбирать вручную."),
+            ("экономику", self.generate_economics, ("economics_table", "economics_assumptions"),
+             "Экономика кампании не посчитана — CPC и CPL придётся брать из кабинета."),
+        )
+        notes: List[str] = []
+        for name, generate, owned_keys, missing_note in extras:
+            try:
+                part = generate(intermediate_results, site_text, facts)
+            except Exception as exc:  # noqa: BLE001 - без части отчёт всё равно полезен
+                # Поля принадлежат этому ответу. Если модель вернула их же в
+                # первом ответе, они не нормализованы и выглядят в отчёте мусором.
+                for key in owned_keys:
+                    final_analysis.pop(key, None)
+                notes.append(missing_note)
+                print(f"{name} не собрано: {exc}")
+                continue
+            notes.extend(part.pop("coverage_notes", []))
+            # Честный блок считает код по данным сайта — дополнительные ответы
+            # модели его не затирают.
+            part.pop("data_gaps", None)
+            final_analysis = self._order_sections({**final_analysis, **part})
+
+        if notes:
+            final_analysis["data_gaps"] = self._unique(list(final_analysis.get("data_gaps", [])) + notes)
+
         # Формируем итоговый результат
         return {
             "url": url,
