@@ -323,6 +323,8 @@ def _label(key: Any) -> str:
         "call_to_action": "Призыв к действию",
         "channel": "Канал",
         "platform": "Площадка",
+        "char_fit": "Знаков в объявлении",
+        "limit_note": "Не проходит лимит",
         "format": "Формат",
         "url": "Адрес сайта",
         "created_at": "Дата анализа",

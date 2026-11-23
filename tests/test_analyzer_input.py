@@ -493,9 +493,92 @@ def test_normalization_turns_markdown_table_into_grid(analyzer):
     )
 
     assert normalized["brief_analysis"] == "пункт один\nпункт два"
-    assert normalized["ad_examples"][0] == {"title": "Заголовок объявления", "body": "Текст объявления"}
+    assert normalized["ad_examples"][0]["title"] == "Заголовок объявления"
+    assert normalized["ad_examples"][0]["body"] == "Текст объявления"
     assert normalized["comparison_table"]["columns"] == ["Сегмент", "Боль"]
     assert normalized["comparison_table"]["rows"] == [["Технологи", "срок"]]
+
+
+def test_ads_are_measured_against_the_platform_limit(analyzer):
+    title = "Противогазы ППМ в наличии и под заказ со склада в Казани с гарантией качества"
+
+    plan = analyzer._normalize_campaign_plan(
+        {
+            "ad_examples": [
+                {
+                    "segment": "Промышленность",
+                    "platform": "Яндекс Директ (поиск)",
+                    "title": title,
+                    "body": "Подбор по чертежам",
+                    "cta": "Позвонить",
+                }
+            ]
+        }
+    )
+
+    ad = plan["ad_examples"][0]
+    assert ad["platform"] == "Яндекс Директ", "название площадки приводят к одному виду"
+    assert ad["char_fit"] == f"заголовок {len(title)}/56 · текст 18/81"
+    assert ad["limit_note"].startswith(f"заголовок длиннее на {len(title) - 56} зн.")
+
+
+def test_telegram_ad_has_no_headline_to_measure(analyzer):
+    plan = analyzer._normalize_campaign_plan(
+        {"ad_examples": [{"segment": "Охотники", "platform": "Telegram Ads", "title": "х", "body": "текст"}]}
+    )
+
+    ad = plan["ad_examples"][0]
+    assert ad["char_fit"] == "текст 5/160"
+    assert "limit_note" not in ad
+
+
+def test_one_ad_per_segment_is_reported_by_code(analyzer):
+    plan = analyzer._normalize_campaign_plan(
+        {
+            "ad_examples": [
+                {"segment": "Технологи", "platform": "Яндекс Директ", "title": "а", "body": "б"},
+                {"segment": "Технологи", "platform": "VK Реклама", "title": "в", "body": "г"},
+                {"segment": "Закупщики", "platform": "VK Реклама", "title": "д", "body": "е"},
+            ]
+        }
+    )
+
+    notes = "\n".join(plan["coverage_notes"])
+    assert "Закупщики" in notes and "нужен второй вариант" in notes
+    assert "Технологи" not in notes, "два объявления на сегмент — это норма"
+
+
+def test_ads_are_capped_and_the_cut_is_reported(analyzer):
+    plan = analyzer._normalize_campaign_plan({"ad_examples": [{"body": f"объявление {index}"} for index in range(20)]})
+
+    assert len(plan["ad_examples"]) == analyzer_module.MAX_AD_EXAMPLES
+    notes = "\n".join(plan["coverage_notes"])
+    assert "оставлены первые" in notes
+    assert "нет площадки" in notes, "без площадки лимит знаков не проверить"
+
+
+def test_ad_notes_join_the_honest_block_without_erasing_it(analyzer, monkeypatch):
+    sources = [{"id": 1, "url": "https://tateng.ru/", "path": "/", "title": "ТАТИНЖЕНЕР", "chars": 350}]
+    facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": []}
+    monkeypatch.setattr(
+        analyzer, "collect_site_evidence", lambda url: ("структурированный текст сайта " * 10, sources, facts)
+    )
+    monkeypatch.setattr(analyzer, "generate_analysis_steps", lambda text: ["Выделить сегменты"])
+    analyzer.llm_client.answers = {
+        "chat_json": {
+            "steps": ["Выделить сегменты"],
+            "brief_analysis": "разбор",
+            "ad_examples": [{"segment": "Технологи", "platform": "Яндекс Директ", "title": "а", "body": "б"}],
+        }
+    }
+
+    result = analyzer.analyze_site("https://tateng.ru/")
+
+    gaps = "\n".join(result["final_analysis"]["data_gaps"])
+    # Кодовый пропуск из разбора сайта и замечание о креативах — вместе.
+    assert "Цен" in gaps
+    assert "нужен второй вариант" in gaps
+    assert "coverage_notes" not in result["final_analysis"]
 
 
 def test_normalization_drops_empty_or_missing_table(analyzer):
@@ -526,6 +609,9 @@ def test_campaign_plan_prompt_asks_for_semantics_and_negatives(analyzer):
     assert '"keyword_seeds"' in system_prompt
     assert '"negative_keywords"' in system_prompt
     assert "минус-слова" in system_prompt
+    # Креативы обязывают лимитами площадок и двумя вариантами на сегмент.
+    assert "заголовок 56, текст 81" in system_prompt
+    assert "ровно два варианта" in system_prompt
     # Объявления пишутся про реальные товары, поэтому дословные данные сайта —
     # и в этом запросе тоже.
     assert "+7 (843) 200-11-22" in system_prompt

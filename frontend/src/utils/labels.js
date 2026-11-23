@@ -45,6 +45,8 @@ const LABELS = {
   button: 'Кнопка',
   channel: 'Канал',
   platform: 'Площадка',
+  char_fit: 'Знаков в объявлении',
+  limit_note: 'Не проходит лимит',
   format: 'Формат',
   segments: 'Сегменты',
   product: 'Продукт',

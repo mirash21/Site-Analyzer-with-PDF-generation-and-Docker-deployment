@@ -212,9 +212,11 @@ function StructuredValue({ value, depth = 0 }) {
           <div className="report-dl-row" key={key}>
             <dt className="report-dt">{labelFor(key)}</dt>
             <dd className="report-dd">
-              {typeof item === 'string' || typeof item === 'number'
-                ? <MaybeLink value={item} />
-                : <StructuredValue value={item} depth={depth + 1} />}
+              {key === 'limit_note'
+                ? <span className="report-warn">{String(item ?? '')}</span>
+                : typeof item === 'string' || typeof item === 'number'
+                  ? <MaybeLink value={item} />
+                  : <StructuredValue value={item} depth={depth + 1} />}
             </dd>
           </div>
         ))}

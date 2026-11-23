@@ -58,6 +58,27 @@ MAX_KEYWORDS_PER_LIST = 25
 # источника — число, а не ссылка; подмешивать такое к готовому нельзя.
 CAMPAIGN_PLAN_KEYS = ("ad_instructions", "ad_examples", "keyword_seeds", "negative_keywords")
 
+# Лимиты площадок по знакам: объявление, не проходящее в блок, просто не
+# встанет в кампанию. Значения взяты из открытых правил площадок (Яндекс
+# Директ: заголовок 56, текст 81; Google Ads: 30 и 90; VK Реклама: 40 и 90;
+# Telegram Ads: один текст до 160, заголовка нет). Площадки меняют лимиты, поэтому
+# отчёт показывает проверку, а не переписывает текст за модель.
+PLATFORM_LIMITS = {
+    "yandex": {"label": "Яндекс Директ", "title": 56, "body": 81},
+    "google": {"label": "Google Ads", "title": 30, "body": 90},
+    "vk": {"label": "VK Реклама", "title": 40, "body": 90},
+    "telegram": {"label": "Telegram Ads", "title": 0, "body": 160},
+}
+PLATFORM_HINTS = {
+    "yandex": ("директ", "яндекс", "yandex"),
+    "google": ("google", "гугл", "adwords", "адворд"),
+    "vk": ("vk", "вконтакт"),
+    "telegram": ("telegram", "телеграм"),
+}
+UNKNOWN_PLATFORM = "площадка не указана"
+MIN_ADS_PER_SEGMENT = 2
+MAX_AD_EXAMPLES = 12
+
 # Модель ссылается на страницы только номерами: адрес она обязана взять из
 # реестра, а не сочинять. Не распознанный номер факт не теряет, но помечается.
 SOURCE_REFERENCE_UNRESOLVED = "источник не распознан"
@@ -779,12 +800,17 @@ class SiteAnalyzer:
             + "Ответ строго в JSON со всеми полями:\n"
             "{\n"
             '  "ad_instructions": "пошаговая инструкция по запуску кампании; до 1500 знаков, нумерованный список",\n'
-            '  "ad_examples": [ {"segment": "сегмент", "title": "заголовок", "body": "текст объявления", "cta": "призыв"}, ... 3-5 объявлений ],\n'
+            '  "ad_examples": [ {"segment": "сегмент", "platform": "Яндекс Директ | Google Ads | VK Реклама | Telegram Ads", "title": "заголовок объявления", "body": "текст объявления", "cta": "призыв к действию"}, ... 6-12 объявлений: на каждый сегмент два ],\n'
             '  "keyword_seeds": ["поисковые фразы из 2-5 слов, соответствующие товарам и услугам сайта — 12-20 штук"],\n'
             '  "negative_keywords": ["минус-слова, отсекающие нецелевые показы — 10-20 штук"],\n'
             "}\n"
             "Фразы пиши без кавычек, операторов и переносов строк, в начальной форме. "
-            "Одна фраза не может быть одновременно в семантике и в минус-листах."
+            "Одна фраза не может быть одновременно в семантике и в минус-листах.\n\n"
+            "Про объявления: на каждый сегмент ровно два варианта — один про выгоду, второй про возражение "
+            "или страх клиента. Площадку указывай одной из: Яндекс Директ, Google Ads, VK Реклама, Telegram Ads. "
+            "Держись в лимитах знаков: Яндекс Директ — заголовок 56, текст 81; Google Ads — 30 и 90; "
+            "VK Реклама — 40 и 90; Telegram Ads — один текст до 160 знаков, заголовка там нет. "
+            "Пробелы, знаки препинания и цифры считаются; одно слово в заголовке — не длиннее 22 знаков."
         )
 
         user_prompt = f"Контекст о сайте (фрагменты текста):\n{self._fit(site_text, 3000)}"
@@ -967,6 +993,72 @@ class SiteAnalyzer:
             ordered.setdefault(key, value)
         return ordered
 
+    @staticmethod
+    def _match_platform(value) -> str:
+        """Площадка из текста модели: «Директ», «Яндекс Директ (поиск)», «vк»."""
+        text = str(value or "").strip().lower()
+        for key, hints in PLATFORM_HINTS.items():
+            if any(hint in text for hint in hints):
+                return key
+        return ""
+
+    @classmethod
+    def _check_ad_limits(cls, ad: Dict) -> Dict:
+        """Считает знаки объявления против лимита площадки.
+
+        Обрезание «под лимит» молча меняет смысл оффера, поэтому код только
+        измеряет и говорит, что сокращать.
+        """
+        key = cls._match_platform(ad.get("platform"))
+        if not key:
+            ad["platform"] = UNKNOWN_PLATFORM
+            return ad
+
+        limits = PLATFORM_LIMITS[key]
+        title = ad.get("title") or ""
+        body = ad.get("body") or ""
+        ad["platform"] = limits["label"]
+
+        parts = []
+        over = []
+        if limits["title"]:
+            parts.append(f"заголовок {len(title)}/{limits['title']}")
+            if len(title) > limits["title"]:
+                over.append(f"заголовок длиннее на {len(title) - limits['title']} зн.")
+        parts.append(f"текст {len(body)}/{limits['body']}")
+        if len(body) > limits["body"]:
+            over.append(f"текст длиннее на {len(body) - limits['body']} зн.")
+
+        ad["char_fit"] = " · ".join(parts)
+        if over:
+            # Лимит превышен — такое объявление не пройдёт модерацию.
+            ad["limit_note"] = "; ".join(over) + " — сокращать до запуска"
+        return ad
+
+    @classmethod
+    def _ad_coverage_notes(cls, value, ads: List[Dict]) -> List[str]:
+        """Чем код дополняет креативы: площадка, вариантность, срезка списка."""
+        notes: List[str] = []
+        if isinstance(value, list) and len(value) > MAX_AD_EXAMPLES:
+            notes.append(
+                f"Модель дала {len(value)} объявлений — оставлены первые {MAX_AD_EXAMPLES}, иначе отчёт не читается."
+            )
+
+        unknown = sum(1 for ad in ads if ad.get("platform") == UNKNOWN_PLATFORM)
+        if unknown:
+            notes.append(f"У {unknown} объявлений нет площадки — лимиты знаков не проверены.")
+
+        counts: Dict[str, int] = {}
+        for ad in ads:
+            segment = (ad.get("segment") or "").strip() or "без сегмента"
+            counts[segment] = counts.get(segment, 0) + 1
+        for segment, count in counts.items():
+            if count < MIN_ADS_PER_SEGMENT:
+                notes.append(
+                    f"Сегмент «{segment}»: объявлений {count} — нужен второй вариант, про возражение или страх."
+                )
+        return notes
+
     @classmethod
     def _normalize_ad_examples(cls, value) -> List[Dict]:
         """Объявления в форму, которую рисуют интерфейс и PDF."""
@@ -980,12 +1072,15 @@ class SiteAnalyzer:
             if isinstance(item, dict):
                 entry = {str(key): str(val) for key, val in item.items()}
                 if any(entry.values()):
-                    normalized.append(entry)
+                    normalized.append(cls._check_ad_limits(entry))
             elif isinstance(item, str) and item.strip():
                 lines = [line.strip() for line in item.splitlines() if line.strip()]
-                normalized.append(
+                entry = (
                     {"title": lines[0], "body": "\n".join(lines[1:])} if len(lines) > 1 else {"body": item.strip()}
                 )
+                normalized.append(cls._check_ad_limits(entry))
+            if len(normalized) >= MAX_AD_EXAMPLES:
+                break
         return normalized
 
     @classmethod
@@ -1026,12 +1121,16 @@ class SiteAnalyzer:
             result.pop("ad_instructions", None)
 
         examples = cls._normalize_ad_examples(result.get("ad_examples"))
+        notes = cls._ad_coverage_notes(result.get("ad_examples"), examples)
         if examples:
             result["ad_examples"] = examples
         else:
             result.pop("ad_examples", None)
 
         cls._normalize_keywords(result)
+        if notes:
+            # Служебное поле: analyze_site переносит его в честный блок отчёта.
+            result["coverage_notes"] = notes
         return result
 
     @classmethod
@@ -1142,7 +1241,16 @@ class SiteAnalyzer:
         # на середине, а половина отчёта хуже двух целых ответов.
         try:
             campaign_plan = self.generate_campaign_plan(intermediate_results, site_text, facts)
+            # Замечания кода о креативах (нет второго варианта, неизвестная
+            # площадка) попадают в тот же честный блок, что и пропавшие данные,
+            # и не затирают его: план не знает, чего не хватало на сайте.
+            notes = campaign_plan.pop("coverage_notes", [])
+            campaign_plan.pop("data_gaps", None)
             final_analysis = self._order_sections({**final_analysis, **campaign_plan})
+            if notes:
+                final_analysis["data_gaps"] = self._unique(
+                    list(final_analysis.get("data_gaps", [])) + notes
+                )
         except Exception as exc:  # noqa: BLE001 - без плана отчёт всё равно полезен
             # План не должен обнулять разбор сайта, но и молчать нельзя:
             # читатель видит, что семантику собрали не мы.
