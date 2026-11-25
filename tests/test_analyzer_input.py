@@ -308,7 +308,7 @@ def test_candidate_links_pick_offer_pages(analyzer):
     # реквизиты, без которых отчёт нельзя ни проверить, ни оценить.
     assert any("contacts" in link for link in links)
     assert any("about" in link for link in links)
-    assert len(links) <= analyzer_module.MAX_EXTRA_PAGES
+    assert len(links) <= analyzer_module.MAX_QUOTED_PAGES
 
 
 def test_links_spread_over_sections_instead_of_one_catalog(analyzer):
@@ -319,7 +319,7 @@ def test_links_spread_over_sections_instead_of_one_catalog(analyzer):
     links = analyzer.candidate_links("https://tateng.ru/", html)
 
     catalog_pages = [link for link in links if "/katalog-produktsii/" in link]
-    assert len(catalog_pages) <= analyzer_module.MAX_PAGES_PER_SECTION
+    assert len(catalog_pages) <= analyzer_module.MAX_CANDIDATES_PER_SECTION
     assert any(link.endswith("/contacts") for link in links)
     assert any(link.endswith("/prices") for link in links)
 

@@ -26,6 +26,7 @@ const LABELS = {
   site_gaps: 'Что мешает конверсии на сайте',
   site_checks: 'Проверки по разметке сайта',
   site_infra: 'Инфраструктура сайта: robots, sitemap, ссылки',
+  site_crawl: 'Глубина обхода сайта',
   risks_and_checks: 'Риски и что проверить перед запуском',
   data_gaps: 'Каких данных нет',
   keyword_seeds: 'Базовые запросы',

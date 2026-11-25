@@ -232,7 +232,10 @@ def test_evidence_collection_counts_every_page_it_read(analyzer, monkeypatch):
     _, sources, facts = analyzer.collect_site_evidence("https://tateng.ru/")
 
     assert len(sources) >= 2, "тест без внутренних страниц ничего не проверяет"
-    assert facts["signals"]["pages"] == len(sources), "проверено ровно столько, сколько прочитано"
+    assert facts["signals"]["pages"] == facts["crawl"]["pages"], (
+        "разметку считают по всем прочитанным страницам, а не по процитированным"
+    )
+    assert len(sources) <= facts["crawl"]["pages"], "цитат прочитано не больше, чем страниц"
     assert facts["signals"]["analytics"] == {"Яндекс Метрика": 1}, "со страниц без счётчика их не добавляют"
     assert "https://tateng.ru/delivery" in probed, (
         "ссылки внутренних страниц обязаны попасть в пробу, а не только ссылки главной"

@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse, urldefrag
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Tuple
-from app.services import site_infra, site_signals
+from app.services import site_crawl, site_infra, site_signals
 from app.services.llm_client import LLMClient
 
 
@@ -40,14 +40,14 @@ FALLBACK_BLOCK_TAGS = ("div", "td", "th", "span", "dd", "dt", "li", "p")
 MIN_CONTENT_LENGTH = 400
 MIN_FALLBACK_LINE_LENGTH = 40
 
-# Кроме главной разбираем несколько внутренних страниц: у каталогов офферы
-# лежат там, а на главной — только меню.
-MAX_EXTRA_PAGES = 6
-MAX_PAGES_PER_SECTION = 2
+# Кроме главной в текст модели идёт несколько внутренних страниц: у каталогов
+# офферы лежат там, а на главной — только меню. Обход читает больше — см.
+# site_crawl.MAX_CRAWL_PAGES; это число — только потолок цитат для модели.
+MAX_QUOTED_PAGES = 6
+MAX_CANDIDATES_PER_SECTION = 2
 EXTRA_PAGES_SHARE = 0.45
 MENU_SHARE = 0.06
 SITE_FETCH_TIMEOUT = 15
-MIN_EXTRA_PAGE_CHARS = 200
 FACTS_BLOCK_ROOM = 1200
 
 # Ответ сервера для инфраструктурных проверок ждут недолго: страница может
@@ -148,6 +148,7 @@ REPORT_SECTION_ORDER = (
     "site_gaps",
     "site_checks",
     "site_infra",
+    "site_crawl",
     "ad_instructions",
     "keyword_seeds",
     "negative_keywords",
@@ -325,7 +326,7 @@ class SiteAnalyzer:
         корня выдала бы клиенту ложную битую ссылку.
         """
         base_netloc = (urlparse(base_url).netloc or "").lower()
-        seen = {str(url).rstrip("/") for url in skip if url}
+        seen = {site_crawl.norm(url) for url in skip if url}
         found: List[str] = []
         for page_url, html in pages:
             try:
@@ -335,13 +336,16 @@ class SiteAnalyzer:
             home = page_url or base_url
             for anchor in soup.find_all("a", href=True):
                 href = str(anchor.get("href") or "").strip()
-                if not href or href.startswith(("#", "?", "tel:", "mailto:", "javascript:", "data:")):
+                # Якорь «#section» ведёт в то же место, а вот ссылка «?PAGEN_1=2»
+                # — это вторая страница листинга: на Bitrix она записана так, и
+                # отбросив её, обход никогда не увидит другие цены.
+                if not href or href.startswith(("#", "tel:", "mailto:", "javascript:", "data:")):
                     continue
                 absolute = urldefrag(urljoin(home, href)).url
                 parsed = urlparse(absolute)
                 if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != base_netloc:
                     continue
-                key = absolute.rstrip("/")
+                key = site_crawl.norm(absolute)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -565,7 +569,7 @@ class SiteAnalyzer:
 
     @classmethod
     def _checks_block(cls, facts: Dict | None) -> str:
-        """Что посчитано кодом: разметка страниц и ответы сервера.
+        """Что посчитано кодом: глубина обхода, разметка страниц, ответы сервера.
 
         Модель не видит исходный HTML и не делает запросов к сайту. Без
         переданных проверок она пишет «проблемы конверсии» общими словами там,
@@ -573,6 +577,9 @@ class SiteAnalyzer:
         """
         facts = facts or {}
         blocks: List[str] = []
+        crawl = facts.get("crawl") or {}
+        if crawl.get("pages"):
+            blocks.append(site_crawl.render_crawl(crawl))
         signals = facts.get("signals") or {}
         if signals.get("pages"):
             blocks.append(site_signals.render_signals(signals))
@@ -630,8 +637,7 @@ class SiteAnalyzer:
             if not values
         ]
         parts = [
-            f"Прочитано страниц: {len(sources or [])} (главная + "
-            f"{max(len(sources or []) - 1, 0)} внутренних).",
+            site_crawl.describe_pages(sources or [], (facts or {}).get("crawl") or {}),
             f"Знаков текста сайта: {read} из бюджета {budget}.",
         ]
         if missing:
@@ -639,25 +645,26 @@ class SiteAnalyzer:
         return " ".join(parts)
 
     @staticmethod
-    def _spread_over_sections(links: List[str]) -> List[str]:
-        """Не больше MAX_PAGES_PER_SECTION ссылок из одного раздела сайта.
+    def _spread_over_sections(links: List[str], per_section: int = MAX_CANDIDATES_PER_SECTION) -> List[str]:
+        """Не больше per_section ссылок из одного раздела сайта.
 
         Каталог выдаёт десятки однотипных подстраниц, и без ограничения
         анализ съедали шесть групп товаров, а контакты и условия поставки
         не попадали в поле зрения.
         """
-        per_section: Dict[str, int] = {}
+        per_used: Dict[str, int] = {}
         spread: List[str] = []
         for link in links:
             section = (urlparse(link).path.strip("/").split("/") or [""])[0].lower()
-            taken = per_section.get(section, 0)
-            if taken >= MAX_PAGES_PER_SECTION:
+            taken = per_used.get(section, 0)
+            if taken >= per_section:
                 continue
-            per_section[section] = taken + 1
+            per_used[section] = taken + 1
             spread.append(link)
         return spread
 
-    def candidate_links(self, base_url: str, html: str) -> List[str]:
+    def candidate_links(self, base_url: str, html: str, limit: int = MAX_QUOTED_PAGES,
+                        per_section: int = MAX_CANDIDATES_PER_SECTION) -> List[str]:
         """Внутренние ссылки этого же хоста, где обычно живёт оффер."""
         soup = BeautifulSoup(html, "html.parser")
         base_netloc = urlparse(base_url).netloc.lower()
@@ -690,7 +697,7 @@ class SiteAnalyzer:
 
         # Ограничение накладывается после разбора всех ссылок: если резать
         # сразу, шесть страниц каталога вытеснят контакты и цены.
-        return self._spread_over_sections(links)[:MAX_EXTRA_PAGES]
+        return self._spread_over_sections(links, per_section)[:limit]
 
     @staticmethod
     def _page_title(html: str) -> str:
@@ -732,17 +739,33 @@ class SiteAnalyzer:
 
         menu_room = int(MAX_SITE_TEXT_LENGTH * MENU_SHARE)
         extra_room = int(MAX_SITE_TEXT_LENGTH * EXTRA_PAGES_SHARE)
-        per_extra_room = extra_room // max(MAX_EXTRA_PAGES, 1)
+        per_extra_room = extra_room // max(MAX_QUOTED_PAGES, 1)
 
         extras: List[str] = []
-        for link in self.candidate_links(url, html):
+        # Обход читает до site_crawl.MAX_CRAWL_PAGES страниц, а в текст модели
+        # идёт только новое по содержанию. Так проверки разметки считаются по
+        # пятнадцати страницах, а не по четырём, и прайс находится на третьем
+        # уровне вложенности — при неизменном бюджете знаков.
+        policy = site_crawl.CrawlPolicy()
+        policy.take(url, content, root=True)
+        queue: List[str] = policy.rank(self.candidate_links(
+            url, html,
+            limit=site_crawl.MAX_CANDIDATE_LINKS,
+            per_section=site_crawl.MAX_PAGES_PER_SECTION,
+        ))
+        known = {site_crawl.norm(link) for link in [url, *queue]}
+
+        while queue and policy.wants_more():
+            link = queue.pop(0)
+            if not policy.allow(link):
+                continue
             try:
                 extra_html = self.fetch_site_html(link)
-            except Exception:
-                # Внутренняя страница не важнее всего анализа: пропускаем её.
+            except Exception as exc:  # noqa: BLE001 - не открывшаяся страница и есть находка
+                policy.note_failure(link, str(exc))
                 continue
             extra_content, _ = self.extract_page_text(extra_html)
-            if len(extra_content) < MIN_EXTRA_PAGE_CHARS:
+            if policy.take(link, extra_content) != "read":
                 continue
             self._merge_facts(facts, self.extract_business_facts(extra_html))
             facts["signals"] = site_signals.merge_signals(
@@ -750,26 +773,45 @@ class SiteAnalyzer:
             )
             pages_html.append((link, extra_html))
 
-            source_id = len(sources) + 1
-            path = urlparse(link).path.rstrip("/") or "/"
-            sources.append({
-                "id": source_id,
-                "url": link,
-                "path": path,
-                "title": self._page_title(extra_html),
-                "chars": len(extra_content),
-            })
-            extras.append(
-                f"## Источник {source_id}: {path}\n"
-                f"{self._fit(extra_content, per_extra_room)}"
-            )
-            if len(sources) >= MAX_EXTRA_PAGES + 1:
-                break
+            # Ссылки внутренней страницы расширяют обход: до оффера бывает три
+            # уровня вложенности, и с главной они не видны.
+            added = False
+            for deeper in self.internal_links(
+                url, [(link, extra_html)], known, site_crawl.MAX_NEW_LINKS_PER_PAGE
+            ):
+                key = site_crawl.norm(deeper)
+                if key not in known:
+                    known.add(key)
+                    queue.append(deeper)
+                    added = True
+            # Порядок пересчитывают после каждой страницы: «новый раздел» и
+            # «место ещё есть» меняются по мере чтения, а ссылка на вторую
+            # страницу листинга стоит в конце списка — ниже карточек товаров.
+            if added:
+                queue = policy.rank(queue)
+
+            if len(sources) <= MAX_QUOTED_PAGES and policy.goes_to_text(link):
+                source_id = len(sources) + 1
+                path = urlparse(link).path.rstrip("/") or "/"
+                sources.append({
+                    "id": source_id,
+                    "url": link,
+                    "path": path,
+                    "title": self._page_title(extra_html),
+                    "chars": len(extra_content),
+                })
+                extras.append(
+                    f"## Источник {source_id}: {path}\n"
+                    f"{self._fit(extra_content, per_extra_room)}"
+                )
+
+        policy.leftover(len(queue))
+        facts["crawl"] = policy.summary(quoted=len(sources))
 
         # Инфраструктура: robots, sitemap и живые ссылки. Это отдельные запросы,
         # поэтому идут после сбора текста — страница для анализа нужнее проверки.
         links = self.internal_links(
-            url, pages_html, [source["url"] for source in sources], site_infra.MAX_LINK_CHECKS
+            url, pages_html, list(policy.pages), site_infra.MAX_LINK_CHECKS
         )
         try:
             facts["infra"] = site_infra.probe_site(
@@ -912,6 +954,8 @@ class SiteAnalyzer:
             "Номер источника указывай только тот, который есть в заголовках «Источник N»; своих адресов не выдумывай. "
             "Если переданы проверки, посчитанные кодом, — опирайся на них: нет счётчика, "
             "формы или карты сайта, пиши об этом прямо, а не общими словами про воронку. "
+            "Если обход остановлен или часть ссылок не проверена — не пиши «на сайте нет X» "
+            "про то, чего обход не касался: формулируй это как что проверить, а не как вывод по сайту. "
             "Если данных нет — честно пиши об этом в data_gaps, не заменяя их догадками. "
             + RUSSIAN_ONLY_RULE
         )
@@ -1189,6 +1233,7 @@ class SiteAnalyzer:
         facts = facts or {}
         seeded = (
             cls._seed_data_gaps(facts)
+            + site_crawl.crawl_gaps(facts.get("crawl"))
             + site_signals.signal_gaps(facts.get("signals"))
             + site_infra.infra_gaps(facts.get("infra"))
         )
@@ -1492,6 +1537,11 @@ class SiteAnalyzer:
             infra_checks = site_infra.build_infra_checks(infra) if infra else {"rows": []}
             if infra_checks["rows"]:
                 result["site_infra"] = infra_checks
+            # Глубина обхода — про самого аудитора: клиент должен видеть, по
+            # скольким страницам сделаны выводы и где обход остановился.
+            crawl_checks = site_crawl.build_crawl_checks(facts.get("crawl"))
+            if crawl_checks["rows"]:
+                result["site_crawl"] = crawl_checks
 
         for key in ("site_gaps", "risks_and_checks", "data_gaps"):
             values = cls._normalize_string_list(result.get(key))

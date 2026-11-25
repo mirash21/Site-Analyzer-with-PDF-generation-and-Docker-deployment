@@ -12,6 +12,10 @@
 Дальше — инфраструктура: «404» и «сервер молчит» подменены одним выводом,
 HTML на месте карты назван картой, HEAD-отклик стал битой ссылкой, бюджет
 пробы выключен, редирект ведёт внутрь сети.
+Дальше — глубина обхода: пагинация опознана и стоит в очереди выше карточек,
+отпечаток содержания различает цены, дубль не притворяется источником,
+прочитанное не выдаётся за процитированное, а хвост очереди не исчезает молча
+— остановка названа по имени: кончилось время или достигнут потолок страниц.
 """
 
 import os
@@ -134,13 +138,14 @@ MUTATIONS = [
     (
         "analyzer: квота раздела отключена (каталог вытесняет контакты)",
         "app/services/analyzer.py",
-        "            if taken >= MAX_PAGES_PER_SECTION:",
-        "            if taken >= MAX_PAGES_PER_SECTION * 20:",
+        "            if taken >= per_section:",
+        "            if taken >= per_section * 20:",
     ),
     (
         "analyzer: честный блок отдаёт на откуп модели",
         "app/services/analyzer.py",
         "        seeded = (\n            cls._seed_data_gaps(facts)\n"
+        '            + site_crawl.crawl_gaps(facts.get("crawl"))\n'
         '            + site_signals.signal_gaps(facts.get("signals"))\n'
         '            + site_infra.infra_gaps(facts.get("infra"))\n        )',
         "        seeded = []",
@@ -334,12 +339,8 @@ MUTATIONS = [
     (
         "analyzer: пробелы из проверок теряются в data_gaps",
         "app/services/analyzer.py",
-        "        seeded = (\n            cls._seed_data_gaps(facts)\n"
-        '            + site_signals.signal_gaps(facts.get("signals"))\n'
-        '            + site_infra.infra_gaps(facts.get("infra"))\n        )',
-        "        seeded = (\n            cls._seed_data_gaps(facts)\n"
-        '            + site_signals.signal_gaps(facts.get("signals"))\n'
-        "            + []\n        )",
+        '            + site_signals.signal_gaps(facts.get("signals"))',
+        "            + []",
     ),
     (
         "analyzer: раздел проверок не попадает в отчёт",
@@ -538,14 +539,14 @@ MUTATIONS = [
     (
         "analyzer: прочитанные страницы перепроверяются зондом",
         "app/services/analyzer.py",
-        "        seen = {str(url).rstrip(\"/\") for url in skip if url}",
+        "        seen = {site_crawl.norm(url) for url in skip if url}",
         "        seen = set()",
     ),
     (
         "analyzer: ссылки для пробы не собираются",
         "app/services/analyzer.py",
         "        links = self.internal_links(\n"
-        "            url, pages_html, [source[\"url\"] for source in sources], site_infra.MAX_LINK_CHECKS\n"
+        "            url, pages_html, list(policy.pages), site_infra.MAX_LINK_CHECKS\n"
         "        )",
         "        links = []",
     ),
@@ -577,6 +578,497 @@ MUTATIONS = [
         "pdf: раздел инфраструктуры вышел в PDF сырым ключом",
         "app/services/pdf_report.py",
         '        "site_infra": "Инфраструктура сайта: robots, sitemap, ссылки (посчитано кодом)",',
+        "",
+    ),
+    # --- Глубина обхода: читает много, модели отдаёт новое ------------------
+    (
+        "crawl: адрес считается с якорем — одна страница становится двумя",
+        "app/services/site_crawl.py",
+        '    return urldefrag(str(url or "")).url.rstrip("/").lower()',
+        '    return str(url or "").rstrip("/").lower()',
+    ),
+    (
+        "crawl: регистр домена делит страницу надвое",
+        "app/services/site_crawl.py",
+        '    return urldefrag(str(url or "")).url.rstrip("/").lower()',
+        '    return urldefrag(str(url or "")).url.rstrip("/")',
+    ),
+    (
+        "crawl: раздел берётся из последнего сегмента пути",
+        "app/services/site_crawl.py",
+        '    return (urlparse(url).path.strip("/").split("/") or [""])[0].lower()',
+        '    return (urlparse(url).path.strip("/").split("/") or [""])[-1].lower()',
+    ),
+    (
+        "crawl: пагинация Bitrix не распознана (PAGEN_N — другой листинг)",
+        "app/services/site_crawl.py",
+        "        if low in PAGE_PARAMS or PAGE_NUMBER.match(low):",
+        "        if low in PAGE_PARAMS:",
+    ),
+    (
+        "crawl: страницы в пути (/page/2/) не распознаны",
+        "app/services/site_crawl.py",
+        "    match = PAGED_PATH.search(path)",
+        "    match = None",
+    ),
+    (
+        "crawl: сортировка и фильтр объявлены новым листингом",
+        "app/services/site_crawl.py",
+        '    base = f"{parsed.netloc.lower()}{path.rstrip(\'/\')}"',
+        '    base = f"{parsed.netloc.lower()}{path.rstrip(\'/\')}{parsed.query}"',
+    ),
+    (
+        "crawl: цифры не различают содержание (второй прайс стал дублем)",
+        "app/services/site_crawl.py",
+        'WORD = re.compile(r"[а-яёa-z]{3,}|\\d{2,}", re.I)',
+        'WORD = re.compile(r"[а-яёa-z]{3,}", re.I)',
+    ),
+    (
+        "crawl: шапка в другом регистре посчитана новым содержанием",
+        "app/services/site_crawl.py",
+        '    return set(WORD.findall(str(text or "").lower()))',
+        '    return set(WORD.findall(str(text or "")))',
+    ),
+    (
+        "crawl: отпечаток зависит от порядка слов",
+        "app/services/site_crawl.py",
+        '    return hashlib.sha1(" ".join(words).encode("utf-8")).hexdigest()[:16]',
+        '    return hashlib.sha1(str(text).encode("utf-8")).hexdigest()[:16]',
+    ),
+    (
+        "crawl: пустая страница получила отпечаток и стала дублем сама себя",
+        "app/services/site_crawl.py",
+        '    if not words:\n        return ""',
+        '    if not words:\n        return "пусто"',
+    ),
+    (
+        "crawl: отказ по времени не проверяется до запроса",
+        "app/services/site_crawl.py",
+        '        if self.time_left() <= 0:\n            return "time"',
+        '        if False:\n            return "time"',
+    ),
+    (
+        "crawl: потолок страниц не проверяется до запроса",
+        "app/services/site_crawl.py",
+        '        if len(self.pages) >= self.max_pages:\n            return "budget"',
+        '        if False:\n            return "budget"',
+    ),
+    (
+        "crawl: потолок раздела выключен",
+        "app/services/site_crawl.py",
+        "        if section and self._count(section=section) >= self.max_per_section:",
+        "        if False:",
+    ),
+    (
+        "crawl: потолок глубины листинга выключен",
+        "app/services/site_crawl.py",
+        "        if group and self._count(group=group) >= self.max_per_group:",
+        "        if False:",
+    ),
+    (
+        "crawl: остановка обхода не названа",
+        "app/services/site_crawl.py",
+        '        if reason in ("time", "budget") and not self.stopped:',
+        "        if False:",
+    ),
+    (
+        "crawl: обход не помнит потолок страниц",
+        "app/services/site_crawl.py",
+        "        return self.time_left() > 0 and len(self.pages) < self.max_pages",
+        "        return self.time_left() > 0",
+    ),
+    (
+        "crawl: отказавшие ссылки идут первыми в очереди",
+        "app/services/site_crawl.py",
+        '        if self.reason_for(url):\n            return 3',
+        '        if self.reason_for(url):\n            return 0',
+    ),
+    (
+        "crawl: новый раздел не важнее карточки",
+        "app/services/site_crawl.py",
+        "        if section and not self._count(section=section):\n            return 0",
+        "        if section and not self._count(section=section):\n            return 2",
+    ),
+    (
+        "crawl: порядок очереди = порядок ссылок в HTML",
+        "app/services/site_crawl.py",
+        "            (self.bucket_of(link), pagination_of(link)[1], index, link)",
+        "            (0, pagination_of(link)[1], index, link)",
+    ),
+    (
+        "crawl: страницы листинга идут в порядке ссылки, а не номера",
+        "app/services/site_crawl.py",
+        "            (self.bucket_of(link), pagination_of(link)[1], index, link)",
+        "            (self.bucket_of(link), 0, index, link)",
+    ),
+    (
+        "crawl: очередь не сортируется",
+        "app/services/site_crawl.py",
+        "        return [item[3] for item in sorted(decorated)]",
+        "        return [item[3] for item in decorated]",
+    ),
+    (
+        "crawl: непройденные ссылки очереди потеряны",
+        "app/services/site_crawl.py",
+        "        self.pending = max(0, int(pending))",
+        "        self.pending = 0",
+    ),
+    (
+        "crawl: нехватка времени названа потолком страниц",
+        "app/services/site_crawl.py",
+        '        if self.time_left() <= 0:\n            reason = "time"',
+        '        if self.time_left() <= 0:\n            reason = "budget"',
+    ),
+    (
+        "crawl: повторная страница прочитана второй раз",
+        "app/services/site_crawl.py",
+        '        if key in self.pages:\n            return "repeat"',
+        '        if False:\n            return "repeat"',
+    ),
+    (
+        "crawl: порог текста выключен",
+        "app/services/site_crawl.py",
+        "        if chars < self.min_chars and not root:",
+        "        if False:",
+    ),
+    (
+        "crawl: тонкая главная не запускает обход",
+        "app/services/site_crawl.py",
+        "        if chars < self.min_chars and not root:",
+        "        if chars < self.min_chars:",
+    ),
+    (
+        "crawl: тот же текст под другим адресом прочитан как новый",
+        "app/services/site_crawl.py",
+        "        if sign and same_as:",
+        "        if False:",
+    ),
+    (
+        "crawl: дубль записан без адреса-оригинала",
+        "app/services/site_crawl.py",
+        '            self.duplicates.append({"url": key, "same_as": same_as})',
+        '            self.duplicates.append({"url": key, "same_as": ""})',
+    ),
+    (
+        "crawl: новизна страницы измерена после её же лексикона",
+        "app/services/site_crawl.py",
+        '            "novelty": fresh,',
+        '            "novelty": 0.0,',
+    ),
+    (
+        "crawl: вложенность страницы не записана",
+        "app/services/site_crawl.py",
+        '            "depth": len([part for part in urlparse(url).path.split("/") if part]),',
+        '            "depth": 0,',
+    ),
+    (
+        "crawl: лексикон не пополняется — каждая страница «новая»",
+        "app/services/site_crawl.py",
+        "        self.lexicon |= words_of(text)",
+        "        pass",
+    ),
+    (
+        "crawl: в текст модели идёт всё, что прочитано",
+        "app/services/site_crawl.py",
+        '        return bool(page) and page["novelty"] >= self.novelty_floor',
+        "        return bool(page)",
+    ),
+    (
+        "crawl: страница, которая не открылась, не находка",
+        "app/services/site_crawl.py",
+        '        self.failures.append({"url": norm(url), "reason": (str(reason or "")[:120])})',
+        "        pass",
+    ),
+    (
+        "crawl: число цитат выдано за число прочитанного",
+        "app/services/site_crawl.py",
+        '            "text_pages": int(quoted),',
+        '            "text_pages": len(self.pages),',
+    ),
+    (
+        "crawl: остаток очереди не попал в итог",
+        "app/services/site_crawl.py",
+        '            "pending": self.pending,',
+        '            "pending": 0,',
+    ),
+    (
+        "crawl: глубина вложенности подменена числом страниц",
+        "app/services/site_crawl.py",
+        '            "depth": max((page["depth"] for page in self.pages.values()), default=0),',
+        '            "depth": len(self.pages),',
+    ),
+    (
+        "crawl: таблица выводов там, где обход не делал ничего",
+        "app/services/site_crawl.py",
+        '    if not crawl:\n        return {"columns": [], "rows": []}',
+        '    if False:\n        return {"columns": [], "rows": []}',
+    ),
+    (
+        "crawl: таблица не различает прочитанное и процитированное",
+        "app/services/site_crawl.py",
+        '    if quoted and quoted < pages:\n        cell += f", в текст анализа вошло {quoted}"',
+        '    if False:\n        cell += f", в текст анализа вошло {quoted}"',
+    ),
+    (
+        "crawl: одна главная страница объявлена достаточной выборкой",
+        "app/services/site_crawl.py",
+        "        OK if pages >= 3 else CHECK,",
+        "        OK,",
+    ),
+    (
+        "crawl: хвост очереди скрыт из строки полноты",
+        "app/services/site_crawl.py",
+        '        if pending:\n            seen += f", ссылок осталось непроверенными: {pending}"',
+        '        if False:\n            seen += f", ссылок осталось непроверенными: {pending}"',
+    ),
+    (
+        "crawl: дубликаты содержания — норма",
+        "app/services/site_crawl.py",
+        "        CHECK if duplicates else OK,",
+        "        OK,",
+    ),
+    (
+        "crawl: дубликат назван без адресов",
+        "app/services/site_crawl.py",
+        '        duplicates[0]["url"] + " совпадает с " + duplicates[0]["same_as"] if duplicates else',
+        '        "страницы совпадают по тексту" if duplicates else',
+    ),
+    (
+        "crawl: мёртвая страница не ошибка",
+        "app/services/site_crawl.py",
+        "            BAD,",
+        "            OK,",
+    ),
+    (
+        "crawl: страницы без текста выпали из таблицы",
+        "app/services/site_crawl.py",
+        '    if refused.get("thin"):',
+        "    if False:",
+    ),
+    (
+        "crawl: остановка обхода пропала из честного блока",
+        "app/services/site_crawl.py",
+        '        if crawl.get("stopped"):\n            detail = f" {crawl[\'stopped\']}"',
+        '        if False:\n            detail = f" {crawl[\'stopped\']}"',
+    ),
+    (
+        "crawl: непройденные ссылки пропали из честного блока",
+        "app/services/site_crawl.py",
+        '            if pending:\n                detail += f", непроверенных ссылок осталось: {pending}"',
+        '            if False:\n                detail += f", непроверенных ссылок осталось: {pending}"',
+    ),
+    (
+        "crawl: неполный раздел не назван пробелом",
+        "app/services/site_crawl.py",
+        '        if int(crawl.get("refused", {}).get("section", 0)):',
+        "        if False:",
+    ),
+    (
+        "crawl: блок промпта сочиняется на пустом обходе",
+        "app/services/site_crawl.py",
+        '    if not crawl:\n        return ""',
+        '    if False:\n        return ""',
+    ),
+    (
+        "crawl: модель не знает, что цитат меньше прочитанного",
+        "app/services/site_crawl.py",
+        "    if quoted and quoted < pages:\n        lines.append(",
+        "    if False:\n        lines.append(",
+    ),
+    (
+        "crawl: дубли адресов скрыты от модели",
+        "app/services/site_crawl.py",
+        '    if duplicates:\n        lines.append(',
+        '    if False:\n        lines.append(',
+    ),
+    (
+        "crawl: не открывшиеся страницы скрыты от модели",
+        "app/services/site_crawl.py",
+        '    if failures:\n        lines.append("Не открылись: "',
+        '    if False:\n        lines.append("Не открылись: "',
+    ),
+    (
+        "crawl: модель не знает, где обход остановился",
+        "app/services/site_crawl.py",
+        '    if crawl.get("stopped"):\n        lines.append(f"Обход остановлен: {crawl[\'stopped\']} — ниже по списку ссылки не проверены")',
+        '    if False:\n        lines.append(f"Обход остановлен: {crawl[\'stopped\']} — ниже по списку ссылки не проверены")',
+    ),
+    (
+        "crawl: охват выдаёт процитированное за прочитанное",
+        "app/services/site_crawl.py",
+        "    if read <= quoted:",
+        "    if True:",
+    ),
+    (
+        "crawl: охват не говорит, сколько вошло в текст",
+        "app/services/site_crawl.py",
+        '        f"в текст анализа вошло {quoted}: остальные повторяли уже прочитанное, "',
+        '        f"прочитанное повторяло уже изложенное, "',
+    ),
+    (
+        "crawl: потолок страниц обхода стал единичным",
+        "app/services/site_crawl.py",
+        "MAX_CRAWL_PAGES = 18",
+        "MAX_CRAWL_PAGES = 1",
+    ),
+    (
+        "crawl: потолок страниц раздела выключен",
+        "app/services/site_crawl.py",
+        "MAX_PAGES_PER_SECTION = 4",
+        "MAX_PAGES_PER_SECTION = 20",
+    ),
+    (
+        "crawl: потолок глубины листинга выключен в константе",
+        "app/services/site_crawl.py",
+        "MAX_PAGES_PER_GROUP = 3",
+        "MAX_PAGES_PER_GROUP = 20",
+    ),
+    (
+        "crawl: со страницы берут шесть ссылок — пагинация не видна",
+        "app/services/site_crawl.py",
+        "MAX_NEW_LINKS_PER_PAGE = 40",
+        "MAX_NEW_LINKS_PER_PAGE = 6",
+    ),
+    (
+        "crawl: кандидатов берут ровно потолок — хвост исчезает молча",
+        "app/services/site_crawl.py",
+        "MAX_CANDIDATE_LINKS = 60",
+        "MAX_CANDIDATE_LINKS = MAX_CRAWL_PAGES",
+    ),
+    (
+        "crawl: времени на обход не осталось",
+        "app/services/site_crawl.py",
+        "CRAWL_BUDGET_SECONDS = 50.0",
+        "CRAWL_BUDGET_SECONDS = 0.0",
+    ),
+    (
+        "crawl: порог новизны нулевой",
+        "app/services/site_crawl.py",
+        "NOVELTY_FOR_TEXT = 0.12",
+        "NOVELTY_FOR_TEXT = 0.0",
+    ),
+    (
+        "crawl: порог осмысленного текста нулевой",
+        "app/services/site_crawl.py",
+        "MIN_PAGE_CHARS = 120",
+        "MIN_PAGE_CHARS = 0",
+    ),
+    (
+        "crawl: слово вывода разошлось с остальными таблицами",
+        "app/services/site_crawl.py",
+        'OK = "норма"',
+        'OK = "ok"',
+    ),
+    # --- Обход в составе анализа и отчёта ------------------------------------
+    (
+        "analyzer: главная вошла в обход без права на тонкий текст",
+        "app/services/analyzer.py",
+        "        policy.take(url, content, root=True)",
+        "        policy.take(url, content)",
+    ),
+    (
+        "analyzer: кандидатов с главной берут ровно потолок обхода",
+        "app/services/analyzer.py",
+        "            limit=site_crawl.MAX_CANDIDATE_LINKS,",
+        "            limit=site_crawl.MAX_CRAWL_PAGES,",
+    ),
+    (
+        "analyzer: с главной берут по одной ссылке раздела",
+        "app/services/analyzer.py",
+        "            per_section=site_crawl.MAX_PAGES_PER_SECTION,",
+        "            per_section=1,",
+    ),
+    (
+        "analyzer: очередь не пересортирована после прочитанной страницы",
+        "app/services/analyzer.py",
+        "            if added:\n                queue = policy.rank(queue)",
+        "            if False:\n                queue = policy.rank(queue)",
+    ),
+    (
+        "analyzer: ссылки внутренней страницы не расширяют обход",
+        "app/services/analyzer.py",
+        "                    queue.append(deeper)",
+        "                    pass",
+    ),
+    (
+        "analyzer: не открывшаяся страница пропала без следа",
+        "app/services/analyzer.py",
+        "                policy.note_failure(link, str(exc))",
+        "                pass",
+    ),
+    (
+        "analyzer: хвост очереди не посчитан",
+        "app/services/analyzer.py",
+        "        policy.leftover(len(queue))",
+        "        policy.leftover(0)",
+    ),
+    (
+        "analyzer: итог обхода не знает числа цитат",
+        "app/services/analyzer.py",
+        '        facts["crawl"] = policy.summary(quoted=len(sources))',
+        '        facts["crawl"] = policy.summary()',
+    ),
+    (
+        "analyzer: глубина обхода не дошла до промптов",
+        "app/services/analyzer.py",
+        '        if crawl.get("pages"):\n            blocks.append(site_crawl.render_crawl(crawl))',
+        '        if False:\n            blocks.append(site_crawl.render_crawl(crawl))',
+    ),
+    (
+        "analyzer: пробелы обхода теряются в data_gaps",
+        "app/services/analyzer.py",
+        '            + site_crawl.crawl_gaps(facts.get("crawl"))',
+        "            + []",
+    ),
+    (
+        "analyzer: раздел глубины обхода не попадает в отчёт",
+        "app/services/analyzer.py",
+        '            crawl_checks = site_crawl.build_crawl_checks(facts.get("crawl"))\n'
+        '            if crawl_checks["rows"]:',
+        '            crawl_checks = site_crawl.build_crawl_checks(facts.get("crawl"))\n'
+        "            if False:",
+    ),
+    (
+        "analyzer: раздел обхода выпал из порядка чтения",
+        "app/services/analyzer.py",
+        '    "site_infra",\n    "site_crawl",\n',
+        '    "site_infra",\n',
+    ),
+    (
+        "analyzer: охват сайта снова считает цитаты прочитанным",
+        "app/services/analyzer.py",
+        "            site_crawl.describe_pages(sources or [], (facts or {}).get(\"crawl\") or {}),",
+        '            f"Прочитано страниц: {len(sources or [])}.",',
+    ),
+    (
+        "analyzer: ссылка пагинации отброшена как якорь",
+        "app/services/analyzer.py",
+        '                if not href or href.startswith(("#", "tel:", "mailto:", "javascript:", "data:")):',
+        '                if not href or href.startswith(("#", "?", "tel:", "mailto:", "javascript:", "data:")):',
+    ),
+    (
+        "analyzer: потолок цитат для модели выключен",
+        "app/services/analyzer.py",
+        "MAX_QUOTED_PAGES = 6",
+        "MAX_QUOTED_PAGES = 20",
+    ),
+    (
+        "analyzer: страница идёт в текст без проверки потолка цитат",
+        "app/services/analyzer.py",
+        "            if len(sources) <= MAX_QUOTED_PAGES and policy.goes_to_text(link):",
+        "            if policy.goes_to_text(link):",
+    ),
+    (
+        "analyzer: вывод о непрочитанном не ограничен в промпте",
+        "app/services/analyzer.py",
+        '            "Если обход остановлен или часть ссылок не проверена — не пиши «на сайте нет X» "\n'
+        '            "про то, чего обход не касался: формулируй это как что проверить, а не как вывод по сайту. "',
+        '            ""',
+    ),
+    (
+        "pdf: раздел глубины обхода вышел в PDF сырым ключом",
+        "app/services/pdf_report.py",
+        '        "site_crawl": "Глубина обхода сайта (посчитано кодом)",',
         "",
     ),
 ]
@@ -616,11 +1108,13 @@ def main():
             "tests/test_analyzer_input.py",
             "tests/test_site_signals.py",
             "tests/test_site_infra.py",
+            "tests/test_site_crawl.py",
         ),
         "app/routers/history.py": ("tests/test_history_pdf_endpoint.py",),
         "app/services/pdf_report.py": ("tests/test_pdf_report.py", "tests/test_site_infra.py"),
         "app/services/site_signals.py": ("tests/test_site_signals.py",),
         "app/services/site_infra.py": ("tests/test_site_infra.py",),
+        "app/services/site_crawl.py": ("tests/test_site_crawl.py",),
     }
     survived = []
 
