@@ -241,3 +241,103 @@ def test_evidence_collection_counts_every_page_it_read(analyzer, monkeypatch):
         "ссылки внутренних страниц обязаны попасть в пробу, а не только ссылки главной"
     )
     assert "https://tateng.ru/catalog" not in probed, "прочитанную страницу не перепроверяют"
+
+
+# --- то, что раньше держалось на догадке ------------------------------------
+
+
+UPPER_PAGE = """
+<HTML><HEAD><TITLE>Станки</TITLE>
+<META NAME="DESCRIPTION" CONTENT="Поставка станков и инструмента">
+<META NAME="VIEWPORT" CONTENT="width=device-width, initial-scale=1">
+<LINK REL="CANONICAL" HREF="https://tateng.ru/katalog">
+<META PROPERTY="OG:TITLE" CONTENT="Станки">
+<SCRIPT TYPE="APPLICATION/LD+JSON">{"@type":"Organization"}</SCRIPT>
+<SCRIPT SRC="https://mc.yandex.ru/metrika/tag.js"></SCRIPT>
+</HEAD><BODY>
+<H1>Поставка станков</H1>
+<FORM><INPUT NAME="phone" TYPE="TEL"></FORM>
+<A HREF="TEL:+78432001122">Позвонить</A>
+<A HREF="MAILTO:INFO@TATENG.RU">Написать</A>
+<A HREF="HTTPS://WA.ME/78432001122">WhatsApp</A>
+<IMG SRC="stationok.png" ALT="Фрезерный станок">
+</BODY></HTML>
+"""
+
+
+def alt_page(missing: int, total: int) -> str:
+    """Страница из total картинок, где missing — без alt."""
+    pictures = "".join(
+        f'<img src="{index}.png">' if index < missing
+        else f'<img src="{index}.png" alt="Станок">' for index in range(total)
+    )
+    return f"<html><head><title>Станки</title></head><body>{pictures}</body></html>"
+
+
+def test_uppercase_markup_is_the_same_markup():
+    """Регистр атрибутов не превращает стоящее в «не найдено»."""
+    table = marks.build_site_checks(marks.scan_page(UPPER_PAGE))
+    complaints = [row for row in table["rows"] if not row[2].startswith(marks.OK)]
+
+    assert not complaints, f"регистр не должен менять вывод: {complaints}"
+
+
+def test_tag_manager_is_not_reported_as_event_tracking():
+    """Консолидатор тегов прячет содержимое: про события по нему молчат."""
+    page = GOOD_PAGE.replace(
+        "</head>",
+        '<script src="https://www.googletagmanager.com/gtm.js?id=GTM-XXXX"></script></head>',
+    )
+    row_cell = row_of(marks.build_site_checks(marks.scan_page(page)), "Счётчики и пиксели")
+
+    assert "Tag Manager" in row_cell[1]
+    assert "видно только в кабинете" in row_cell[2]
+
+
+def test_counter_on_every_page_is_not_flagged_with_coverage():
+    row_cell = row_of(marks.build_site_checks(marks.scan_page(GOOD_PAGE)), "Счётчики и пиксели")
+
+    assert row_cell[1] == "найдены: Яндекс Метрика", "охват 1 из 1 — это не охват"
+
+
+def test_quarter_of_pictures_without_alt_is_still_the_norm():
+    quarter = marks.build_site_checks(marks.scan_page(alt_page(1, 4)))
+    half = marks.build_site_checks(marks.scan_page(alt_page(2, 4)))
+
+    assert row_of(quarter, "Картинки без alt")[1] == "1 из 4 (25%)"
+    assert row_of(quarter, "Картинки без alt")[2].startswith(marks.OK)
+    assert row_of(half, "Картинки без alt")[1] == "2 из 4 (50%)"
+    assert row_of(half, "Картинки без alt")[2].startswith(marks.CHECK)
+
+
+def test_a_site_without_pictures_is_not_blamed_for_alt():
+    row_cell = row_of(
+        marks.build_site_checks(marks.scan_page(alt_page(0, 0))), "Картинки без alt")
+
+    assert row_cell[1] == "картинок нет"
+    assert row_cell[2].startswith(marks.OK)
+    assert "проверять нечего" in row_cell[2]
+
+
+def test_merge_survives_a_side_that_was_never_scanned():
+    merged = marks.merge_signals(None, marks.scan_page(GOOD_PAGE))
+
+    assert merged["pages"] == 1 and merged["analytics"] == {"Яндекс Метрика": 1}
+    assert marks.merge_signals(merged, None)["forms"] == 1
+
+
+def test_prompt_block_names_absence_instead_of_zero():
+    block = marks.render_signals(marks.scan_page(GOOD_PAGE))
+
+    assert "без title: нет" in block
+    assert "картинок без alt: 0 из 1" in block
+
+
+def test_a_form_without_counters_leaves_exactly_one_gap():
+    page = BAD_PAGE.replace("</body>", '<form><input name="q"></form></body>')
+
+    assert marks.signal_gaps(marks.scan_page(page)) == [marks.NO_ANALYTICS_GAP]
+
+
+def test_absence_of_pages_is_not_a_missing_count():
+    assert marks._missing(3, 0) == "нет данных"

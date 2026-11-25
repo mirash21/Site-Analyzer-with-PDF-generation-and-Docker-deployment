@@ -99,7 +99,9 @@ def scan_page(html: str) -> Dict:
     if not title.strip():
         signals["titles_missing"] = 1
 
-    meta = soup.find("meta", attrs={"name": "description"})
+    # Регистр атрибута — не находка: шаблон сайта пишет name="DESCRIPTION"
+    # так же, как name="description", а молчание здесь читалось бы как «его нет».
+    meta = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
     if not (meta and (meta.get("content") or "").strip()):
         signals["descriptions_missing"] = 1
 
@@ -287,8 +289,10 @@ def build_site_checks(signals: Dict) -> Dict:
     row(
         "Картинки без alt",
         f"{no_alt} из {images} ({share}%)" if images else "картинок нет",
-        OK if images and share <= 25 else CHECK,
-        "alt читают поиск и голосовой браузер",
+        # Нет ни одной картинки — нечего и проверять: «проверить» по пустому
+        # месту читалось бы как находка, которой на сайте нет.
+        OK if not images or share <= 25 else CHECK,
+        "alt читают поиск и голосовой браузер" if images else "картинок нет — проверять нечего",
     )
 
     return table

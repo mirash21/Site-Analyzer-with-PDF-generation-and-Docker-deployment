@@ -6,6 +6,7 @@
 """
 
 import pytest
+from bs4 import BeautifulSoup
 
 from app.services import analyzer as analyzer_module
 from app.services.analyzer import SiteAnalyzer
@@ -852,3 +853,25 @@ def test_full_cycle_uses_structured_input(analyzer, monkeypatch):
     # Экономика — третий ответ модели, и он тоже доезжает до отчёта.
     assert result["final_analysis"]["economics_table"]["columns"] == ["Показатель", "Значение", "Откуда"]
     assert keys.index("negative_keywords") < keys.index("economics_table")
+
+
+def test_meta_reading_ignores_the_case_of_an_attribute():
+    """Регистр name у meta — не признак отсутствия: описание не теряется."""
+    upper = BeautifulSoup('<META NAME="DESCRIPTION" CONTENT="Поставка  станков">',
+                          "html.parser")
+    lower = BeautifulSoup('<meta name="description" content="Поставка станков">', "html.parser")
+    prop = BeautifulSoup('<meta property="og:description" content="Товар со склада">',
+                         "html.parser")
+    absent = BeautifulSoup('<meta name="keywords" content="станки">', "html.parser")
+
+    assert SiteAnalyzer._meta(upper, "description") == "Поставка станков"
+    assert SiteAnalyzer._meta(upper, "description") == SiteAnalyzer._meta(lower, "description")
+    assert SiteAnalyzer._meta(prop, "og:description") == "Товар со склада"
+    assert SiteAnalyzer._meta(absent, "description") == ""
+
+
+def test_meta_reading_does_not_match_a_longer_name():
+    """«twitter:description» — чужой тег: подстрока выдала бы его вместо пустоты."""
+    page = BeautifulSoup('<meta name="twitter:description" content="не то">', "html.parser")
+
+    assert SiteAnalyzer._meta(page, "description") == ""

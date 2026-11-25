@@ -461,7 +461,11 @@ class SiteAnalyzer:
     @staticmethod
     def _meta(soup: BeautifulSoup, name: str) -> str:
         """Метаописание страницы (description или og:description)."""
-        tag = soup.find("meta", attrs={"name": name}) or soup.find("meta", attrs={"property": name})
+        # Шаблон сайта пишет name="DESCRIPTION" не реже, чем name="description":
+        # регистр здесь не признак отсутствия, а значит, искать надо без него.
+        pattern = re.compile(f"^{re.escape(name)}$", re.I)
+        tag = (soup.find("meta", attrs={"name": pattern})
+               or soup.find("meta", attrs={"property": pattern}))
         if not tag:
             return ""
         return re.sub(r"\s+", " ", tag.get("content") or "").strip()

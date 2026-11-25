@@ -530,3 +530,44 @@ def test_probe_never_follows_a_redirect_into_internal_address(analyzer, monkeypa
 def test_probe_refuses_addresses_outside_the_public_web(url):
     with pytest.raises(analyzer_module.SSRFError):
         SiteAnalyzer._validate_url(url)
+
+
+# --- ветки, которые раньше держались на догадке -----------------------------
+
+
+def test_a_gone_file_is_absent_and_not_an_error():
+    """410 — это «файла нет», и клиенту про это говорят одно и то же, что про 404."""
+    assert infra._state(410, "") == infra._state(404, "") == "absent"
+
+
+def test_robots_rule_without_an_agent_applies_to_everyone():
+    parsed = infra.parse_robots({"status": 200, "text": "DISALLOW: /private/\n"})
+
+    assert parsed["rules"] == 1
+    assert parsed["agents"] == ["*"], "правило без user-agent читают все роботы"
+    assert parsed["state"] == "ok", "регистр директивы не делает файл нечитанным"
+
+
+def test_packed_maps_count_and_www_is_the_same_site():
+    text = (
+        "<urlset>"
+        "<url><loc>https://www.tateng.ru/a.xml.gz</loc></url>"
+        "<url><loc>https://tateng.ru/b.xml</loc></url>"
+        "<url><loc>https://tateng.ru/catalog</loc></url>"
+        "</urlset>"
+    )
+    parsed = infra.parse_sitemap({"status": 200, "text": text}, ORIGIN)
+
+    assert parsed["urls"] == 3
+    assert parsed["nested"] == 2, "и .xml, и .xml.gz — карта, а не страница"
+    assert parsed["offsite"] == 0, "www — тот же сайт, а не чужой хост"
+    assert parsed["state"] == "ok", "индекс — только когда вложенными оказались все адреса"
+
+
+def test_map_sample_is_capped_before_it_reaches_the_prompt():
+    text = "<urlset>" + "".join(
+        f"<url><loc>{ORIGIN}/p{index}</loc></url>" for index in range(9)) + "</urlset>"
+    parsed = infra.parse_sitemap({"status": 200, "text": text}, ORIGIN)
+
+    assert len(parsed["sample"]) == 5
+    assert parsed["urls"] == 9, "срез образца не уменьшает счётчик адресов"

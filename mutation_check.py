@@ -34,6 +34,11 @@ HTML на месте карты назван картой, HEAD-отклик с�
 таблицы ниже, не печататься дважды, не оставлять пустую главу и не обещать
 сроки там, где проверки промолчали; чек-лист работ ведётся тем же списком
 находок, что и очередь, но без потолка строк и с глаголом по каждому выводу.
+Дальше — ветки, которые держались на догадке: регистр атрибутов в разметке не
+признак отсутствия, четверть картинок без alt ещё не находка, пустому месту
+нечего проверять, консолидатор тегов не обещает учёт событий, правило robots
+без user-agent читается всеми, www — тот же сайт, а 410 — всё то же отсутствие
+файла.
 """
 
 import os
@@ -2495,6 +2500,190 @@ MUTATIONS = [
         '        for key in ("site_score", "action_priorities", "executive_summary",\n'
         '                    "implementation_checklist"):',
         '        for key in ("site_score", "action_priorities", "executive_summary"):',
+    ),
+    # --- то, что держало эти проверки на догадке (шаг «тесты и мутации») ----
+    (
+        "signals: описание ищут только в нижнем регистре атрибута",
+        "app/services/site_signals.py",
+        '    meta = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})',
+        '    meta = soup.find("meta", attrs={"name": "description"})',
+    ),
+    (
+        "signals: viewport ищут с учётом регистра",
+        "app/services/site_signals.py",
+        '    if not soup.find("meta", attrs={"name": re.compile("^viewport$", re.I)}):',
+        '    if not soup.find("meta", attrs={"name": re.compile("^viewport$")}):',
+    ),
+    (
+        "signals: canonical ищут с учётом регистра",
+        "app/services/site_signals.py",
+        '    if not soup.find("link", attrs={"rel": re.compile(r"canonical", re.I)}):',
+        '    if not soup.find("link", attrs={"rel": re.compile(r"canonical")}):',
+    ),
+    (
+        "signals: og-тег ждёт точный регистр свойства",
+        "app/services/site_signals.py",
+        '        (tag.get("property") or "").lower().startswith("og:")',
+        '        (tag.get("property") or "").startswith("og:")',
+    ),
+    (
+        "signals: ld+json ищут с учётом регистра",
+        "app/services/site_signals.py",
+        '    signals["jsonld_blocks"] = len(soup.find_all("script", '
+        'type=re.compile("ld\\\\+json", re.I)))',
+        '    signals["jsonld_blocks"] = len(soup.find_all("script", '
+        'type=re.compile("ld\\\\+json")))',
+    ),
+    (
+        "signals: tel-ссылка ждёт нижнего регистра",
+        "app/services/site_signals.py",
+        '    signals["tel_links"] = len(soup.find_all("a", href=re.compile(r"^tel:", re.I)))',
+        '    signals["tel_links"] = len(soup.find_all("a", href=re.compile(r"^tel:")))',
+    ),
+    (
+        "signals: mailto-ссылка ждёт нижнего регистра",
+        "app/services/site_signals.py",
+        '    signals["mailto_links"] = len(soup.find_all("a", '
+        'href=re.compile(r"^mailto:", re.I)))',
+        '    signals["mailto_links"] = len(soup.find_all("a", '
+        'href=re.compile(r"^mailto:")))',
+    ),
+    (
+        "signals: счётчик ищут по разметке одного регистра",
+        "app/services/site_signals.py",
+        "        return any(re.search(pattern, raw, re.I) for pattern in matches)",
+        "        return any(re.search(pattern, raw) for pattern in matches)",
+    ),
+    (
+        "signals: четверть картинок без alt стала находкой",
+        "app/services/site_signals.py",
+        "        OK if not images or share <= 25 else CHECK,",
+        "        OK if not images or share < 25 else CHECK,",
+    ),
+    (
+        "signals: доля картинок без alt перестала считаться",
+        "app/services/site_signals.py",
+        "        OK if not images or share <= 25 else CHECK,",
+        "        OK if not images or share <= 100 else CHECK,",
+    ),
+    (
+        "signals: сайту без картинок вменили проверку alt",
+        "app/services/site_signals.py",
+        "        OK if not images or share <= 25 else CHECK,",
+        "        OK if images and share <= 25 else CHECK,",
+    ),
+    (
+        "signals: пустому месту объясняют про alt",
+        "app/services/site_signals.py",
+        '        "alt читают поиск и голосовой браузер" '
+        'if images else "картинок нет — проверять нечего",',
+        '        "alt читают поиск и голосовой браузер",',
+    ),
+    (
+        "signals: консолидатор тегов обещает учёт событий",
+        "app/services/site_signals.py",
+        '            if "Tag Manager" in analytics',
+        "            if False",
+    ),
+    (
+        "signals: счётчик на всех страницах помечен половинчатым",
+        "app/services/site_signals.py",
+        '        parts.append(f"{name} — на {count} из {pages}" '
+        'if per_page and count < pages else name)',
+        '        parts.append(f"{name} — на {count} из {pages}" '
+        'if per_page and count <= pages else name)',
+    ),
+    (
+        "signals: слияние не переживает отсутствующую сторону",
+        "app/services/site_signals.py",
+        "    target = target or empty_signals()",
+        "    target = target",
+    ),
+    (
+        "signals: слитая страница без словаря уронила бы разбор",
+        "app/services/site_signals.py",
+        "    addition = addition or {}",
+        "    addition = addition",
+    ),
+    (
+        "signals: отсутствие посчитано нулём в промпте",
+        "app/services/site_signals.py",
+        '        return f"{count} из {pages} страниц" if count else "нет"',
+        '        return f"{count} из {pages} страниц"',
+    ),
+    (
+        "signals: форма не отменяет разговор про конверсию",
+        "app/services/site_signals.py",
+        '    if not int(signals.get("forms", 0)):',
+        "    if True:",
+    ),
+    (
+        "signals: отсутствие страниц названо нулём",
+        "app/services/site_signals.py",
+        '    return f"{int(count)} из {pages}" if pages else "нет данных"',
+        '    return f"{int(count)} из {pages}"',
+    ),
+    (
+        "analyzer: регистр name у meta стал признаком отсутствия",
+        "app/services/analyzer.py",
+        "        pattern = re.compile(f\"^{re.escape(name)}$\", re.I)",
+        "        pattern = re.compile(f\"^{re.escape(name)}$\")",
+    ),
+    (
+        "analyzer: meta ищут по подстроке имени",
+        "app/services/analyzer.py",
+        "        pattern = re.compile(f\"^{re.escape(name)}$\", re.I)",
+        "        pattern = re.compile(re.escape(name), re.I)",
+    ),
+    (
+        "infra: исчезнувший файл назван ошибкой",
+        "app/services/site_infra.py",
+        "    if status in (404, 410):",
+        "    if status == 404:",
+    ),
+    (
+        "infra: правило robots без агента повисло",
+        "app/services/site_infra.py",
+        "            if not current:\n"
+        "                current = [\"*\"]\n                agents.append(\"*\")",
+        "            if False:\n"
+        "                current = [\"*\"]\n                agents.append(\"*\")",
+    ),
+    (
+        "infra: директивы robots читаются только строчными",
+        "app/services/site_infra.py",
+        "        key = key.strip().lower()",
+        "        key = key.strip()",
+    ),
+    (
+        "infra: имя агента запоминается в регистре сайта",
+        "app/services/site_infra.py",
+        '            name = (value or "*").lower()',
+        '            name = (value or "*")',
+    ),
+    (
+        "infra: упакованная карта не считается картой",
+        "app/services/site_infra.py",
+        '    out["nested"] = sum(1 for url in locs if url.lower().endswith((".xml", ".xml.gz")))',
+        '    out["nested"] = sum(1 for url in locs if url.lower().endswith(".xml"))',
+    ),
+    (
+        "infra: www признан чужим хостом",
+        "app/services/site_infra.py",
+        'not in ("", base_host, "www." + base_host)',
+        'not in ("", base_host)',
+    ),
+    (
+        "infra: индекс карт опознан по первому вложенному адресу",
+        "app/services/site_infra.py",
+        '    elif out["nested"] == len(locs) and len(locs) > 1:',
+        '    elif out["nested"] >= 1 and len(locs) > 1:',
+    ),
+    (
+        "infra: образец карты не срезан",
+        "app/services/site_infra.py",
+        '    out["sample"] = locs[:5]',
+        '    out["sample"] = locs',
     ),
 ]
 
