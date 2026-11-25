@@ -20,6 +20,11 @@ HTML на месте карты назван картой, HEAD-отклик с�
 и живость свою проверяет пробой ссылок, а не пустой страницей в отчёте.
 Дальше — потолок раздела считается долей бюджета: на сайте, где всё содержание
 в одном каталоге, обход обязан выбрать страницы, а не уйти с половиной бюджета.
+Дальше — скорость: свой замер не путается с чужим PSI, «молчит» не значит
+«не найдено», defer снимает блокировку, квота Google не объявляется ошибкой сайта,
+а неизмеренное остаётся «не проверено» — с пробелом в честном блоке. Вес, которого
+сервер не назвал, не превращается ни в «ноль байт», ни в «норму»: незваный вес
+статики остаётся измеренным только у тех файлов, где Content-Length был.
 """
 
 import os
@@ -151,7 +156,8 @@ MUTATIONS = [
         "        seeded = (\n            cls._seed_data_gaps(facts)\n"
         '            + site_crawl.crawl_gaps(facts.get("crawl"))\n'
         '            + site_signals.signal_gaps(facts.get("signals"))\n'
-        '            + site_infra.infra_gaps(facts.get("infra"))\n        )',
+        '            + site_infra.infra_gaps(facts.get("infra"))\n'
+        '            + site_speed.speed_gaps(facts.get("speed"))\n        )',
         "        seeded = []",
     ),
     (
@@ -1247,6 +1253,698 @@ MUTATIONS = [
         '        "site_crawl": "Глубина обхода сайта (посчитано кодом)",',
         "",
     ),
+    # --- Скорость: замеры свои, PSI чужие и «как получится» -----------------
+    (
+        "speed: скрипт в теле страницы записан блокирующим",
+        "app/services/site_speed.py",
+        '    blocking = [\n        tag for tag in in_head',
+        '    blocking = [\n        tag for tag in scripts',
+    ),
+    (
+        "speed: defer и async не снимают блокировку отрисовки",
+        "app/services/site_speed.py",
+        '        return "async" in attrs or "defer" in attrs',
+        "        return False",
+    ),
+    (
+        "speed: свой хост записан чужим подключением",
+        "app/services/site_speed.py",
+        '        return bool(netloc) and netloc != host and not netloc.endswith("." + host)',
+        "        return bool(netloc)",
+    ),
+    (
+        "speed: блокировка зума замечена только в user-scalable",
+        "app/services/site_speed.py",
+        'VIEWPORT_LOCK = re.compile(r"(user-scalable\\s*=\\s*no|maximum-scale\\s*=\\s*1(\\.0)?\\b)", re.I)',
+        'VIEWPORT_LOCK = re.compile(r"(user-scalable\\s*=\\s*no)", re.I)',
+    ),
+    (
+        "speed: размеры картинок не сверяются с разметкой",
+        "app/services/site_speed.py",
+        '        return not (str(tag.get("width") or "").strip() and str(tag.get("height") or "").strip())',
+        "        return True",
+    ),
+    (
+        "speed: ленивая загрузка приписана всем картинкам",
+        "app/services/site_speed.py",
+        '        "images_lazy": sum(1 for tag in images if (tag.get("loading") or "").lower() == "lazy"),',
+        '        "images_lazy": len(images),',
+    ),
+    (
+        "speed: обычный src принят за набор размеров",
+        "app/services/site_speed.py",
+        '        return bool((tag.get("srcset") or tag.get("data-srcset") or "").strip())',
+        '        return bool(str(tag.get("src") or "").strip())',
+    ),
+    (
+        "speed: webp и avif не опознаны как облегчённые форматы",
+        "app/services/site_speed.py",
+        'MODERN_IMAGE = re.compile(r"\\.(webp|avif)(\\?|#|$)", re.I)',
+        'MODERN_IMAGE = re.compile(r"\\.(gif|svg)(\\?|#|$)", re.I)',
+    ),
+    (
+        "speed: пустой ответ засчитан прочитанной страницей",
+        "app/services/site_speed.py",
+        '    raw = str(html or "")\n    if not raw.strip():\n        return out',
+        '    raw = str(html or "")\n    if False:\n        return out',
+    ),
+    (
+        "speed: предзагрузка перестала быть предзагрузкой шрифта",
+        "app/services/site_speed.py",
+        '    preload = [tag for tag in links if "preload" in rel_of(tag)]',
+        "    preload = []",
+    ),
+    (
+        "speed: узлы DOM не посчитаны",
+        "app/services/site_speed.py",
+        '        "dom_nodes": len(soup.find_all()),',
+        '        "dom_nodes": 0,',
+    ),
+    (
+        "speed: потолок тяжёлого дерева отключён",
+        "app/services/site_speed.py",
+        "DOM_BAD_NODES = 1_500",
+        "DOM_BAD_NODES = 100_000",
+    ),
+    (
+        "speed: относительный адрес ресурса не превращён в путь сайта",
+        "app/services/site_speed.py",
+        '    return urljoin(base, str(href or "").strip())',
+        '    return str(href or "").strip()',
+    ),
+    (
+        "speed: незамеренная главная объявлена замеренной",
+        "app/services/site_speed.py",
+        "    measured = bool(probe.get(\"status\")) and bool(\n"
+        "        probe.get(\"ttfb_ms\") or probe.get(\"content_bytes\")\n"
+        "    )",
+        "    measured = True",
+    ),
+    (
+        "speed: тип контента не отделён от кодировки",
+        "app/services/site_speed.py",
+        '    content_type = (headers.get("content-type") or "").split(";")[0].strip()',
+        '    content_type = (headers.get("content-type") or "").strip()',
+    ),
+    (
+        "speed: объявленная кодировка страницы не увиденна",
+        "app/services/site_speed.py",
+        '        "charset": "utf-8" in (headers.get("content-type") or "").lower(),',
+        '        "charset": False,',
+    ),
+    (
+        "speed: финальный адрес редиректа потерян",
+        "app/services/site_speed.py",
+        '        "final_path": urlparse(probe.get("final_url") or "").path or "",',
+        '        "final_path": "",',
+    ),
+    (
+        "speed: редирект перестал быть поводом проверить",
+        "app/services/site_speed.py",
+        "            CHECK if hops else OK,",
+        "            OK,",
+    ),
+    (
+        "speed: число шагов редиректа пишут и когда их нет",
+        "app/services/site_speed.py",
+        '            f"{hops} шага, финальный адрес: {final}" if hops else "сразу 200",',
+        '            f"{hops} шага, финальный адрес: {final}",',
+    ),
+    (
+        "speed: HTTP/1.1 объявлен мультиплексированием",
+        "app/services/site_speed.py",
+        '            modern = version.replace("HTTP/", "").rstrip(".0") in ("2", "3")',
+        "            modern = True",
+    ),
+    (
+        "speed: протокол выводят, даже когда его не измерили",
+        "app/services/site_speed.py",
+        '        version = page.get("http_version") or ""\n        if version:',
+        '        version = page.get("http_version") or ""\n        if True:',
+    ),
+    (
+        "speed: кэш главной перестал риском устаревания",
+        "app/services/site_speed.py",
+        '            CHECK if _cache_state(cache, "") == "cached" else OK,',
+        "            OK,",
+    ),
+    (
+        "speed: порог медленного сервера сдвинут за разумное",
+        "app/services/site_speed.py",
+        "TTFB_BAD_MS = 600",
+        "TTFB_BAD_MS = 5_000",
+    ),
+    (
+        "speed: потолок веса главной отключён",
+        "app/services/site_speed.py",
+        "PAGE_OK_BYTES = 250_000",
+        "PAGE_OK_BYTES = 50_000_000",
+    ),
+    (
+        "speed: сжатая главная объявлена тяжёлой",
+        "app/services/site_speed.py",
+        "            BAD if (not encoding and size > PAGE_OK_BYTES)",
+        "            BAD if size > PAGE_OK_BYTES",
+    ),
+    (
+        "speed: вес главной оценён только названным весом в сети",
+        "app/services/site_speed.py",
+        "            else CHECK if basis > PAGE_OK_BYTES else OK,",
+        "            else CHECK if wire > PAGE_OK_BYTES else OK,",
+    ),
+    (
+        "speed: незапущенный PSI показан как ответ теста",
+        "app/services/site_speed.py",
+        '    if state == "ok":\n        score = int(psi.get("score") or 0)',
+        '    if True:\n        score = int(psi.get("score") or 0)',
+    ),
+    (
+        "speed: вывод о блокировке противоречит её числу",
+        "app/services/site_speed.py",
+        '            "белый экран держат не сервер, а эти скрипты" if blocking\n'
+        '            else "критический путь загрузки не заблокирован",',
+        '            "критический путь загрузки не заблокирован" if blocking\n'
+        '            else "белый экран держат не сервер, а эти скрипты",',
+    ),
+    (
+        "speed: россыпь блокирующих скриптов осталась замечанием",
+        "app/services/site_speed.py",
+        "            OK if not blocking else CHECK if blocking <= 2 else BAD,",
+        "            OK if not blocking else CHECK,",
+    ),
+    (
+        "speed: чужие виджеты всегда в норме",
+        "app/services/site_speed.py",
+        "        level = OK if third <= THIRD_PARTY_OK else CHECK if third <= THIRD_PARTY_BAD else BAD",
+        "        level = OK",
+    ),
+    (
+        "speed: норма по чужим хостам обнулена",
+        "app/services/site_speed.py",
+        "THIRD_PARTY_OK = 3",
+        "THIRD_PARTY_OK = 0",
+    ),
+    (
+        "speed: четвёртый iframe перестал быть ошибкой",
+        "app/services/site_speed.py",
+        "                CHECK if frames <= 3 else BAD,",
+        "                CHECK,",
+    ),
+    (
+        "speed: сдвиг макета не зависит от доли картинок без размеров",
+        "app/services/site_speed.py",
+        "                OK if not no_dims else CHECK if share <= 50 else BAD,",
+        "                OK if not no_dims else BAD,",
+    ),
+    (
+        "speed: картинки похвалены без ленивой загрузки и форматов",
+        "app/services/site_speed.py",
+        "                OK if modern or srcset else CHECK,",
+        "                OK,",
+    ),
+    (
+        "speed: шрифт без подсказки объявлен подсказанным",
+        "app/services/site_speed.py",
+        "                OK if hinted else CHECK,",
+        "                OK,",
+    ),
+    (
+        "speed: мобильная строка не различает viewport и запрет зума",
+        "app/services/site_speed.py",
+        "            OK if markup.get(\"viewport\") and not markup.get(\"zoom_locked\") else CHECK,",
+        "            OK if markup.get(\"viewport\") else CHECK,",
+    ),
+    (
+        "speed: объяснение зума противоречит разметке",
+        "app/services/site_speed.py",
+        '            "мелкий текст нельзя приблизить — заявка теряется на самом интересном"\n'
+        "            if markup.get(\"zoom_locked\")",
+        '            "телефон знает, что страница под него сверстана"\n'
+        "            if markup.get(\"zoom_locked\")",
+    ),
+    (
+        "speed: молчание сервера записано отсутствием файла",
+        "app/services/site_speed.py",
+        '        if not status:\n            out["unreachable"] += 1\n            continue',
+        '        if not status:\n            out["dead"].append({"url": url, "status": status})\n'
+        "            continue",
+    ),
+    (
+        "speed: ответ 404 выпал из битых ресурсов",
+        "app/services/site_speed.py",
+        '        if status >= 400:\n            out["dead"].append({"url": url, "status": status})',
+        '        if status >= 500:\n            out["dead"].append({"url": url, "status": status})',
+    ),
+    (
+        "speed: бюджет времени пробы выключен",
+        "app/services/site_speed.py",
+        "        if clock() - started > budget:",
+        "        if False:",
+    ),
+    (
+        "speed: число опробованных ресурсов не считается",
+        "app/services/site_speed.py",
+        '        status = int(head.get("status") or 0)\n        out["checked"] += 1',
+        '        status = int(head.get("status") or 0)',
+    ),
+    (
+        "speed: no-cache разрешён как долгий кэш",
+        "app/services/site_speed.py",
+        '    if "no-store" in cc or "no-cache" in cc:\n        return "forbidden"',
+        '    if "no-store" in cc:\n        return "forbidden"',
+    ),
+    (
+        "speed: минутный кэш сравнен с годовым",
+        "app/services/site_speed.py",
+        '        return "cached" if seconds >= 60 else "short" if seconds > 0 else "forbidden"',
+        '        return "cached"',
+    ),
+    (
+        "speed: прошедшая дата Expires засчитана кэшем",
+        "app/services/site_speed.py",
+        '    if value and value != "0" and "1970" not in value:',
+        '    if value and value != "0":',
+    ),
+    (
+        "speed: чужие ресурсы пробуют раньше своих",
+        "app/services/site_speed.py",
+        "    return (own + foreign)[: max(0, int(limit))]",
+        "    return (foreign + own)[: max(0, int(limit))]",
+    ),
+    (
+        "speed: лимит проб статики выключен",
+        "app/services/site_speed.py",
+        "    return (own + foreign)[: max(0, int(limit))]",
+        "    return own + foreign",
+    ),
+    (
+        "speed: пробу ресурсов не делают",
+        "app/services/site_speed.py",
+        "MAX_ASSET_PROBES = 6",
+        "MAX_ASSET_PROBES = 0",
+    ),
+    (
+        "speed:resource без сжатия назван тяжёлым без меры",
+        "app/services/site_speed.py",
+        '        out["uncompressed"] += 1 if (not encoding and size > COMPRESS_MIN_BYTES) else 0',
+        '        out["uncompressed"] += 1 if not encoding else 0',
+    ),
+    (
+        "speed: кэшированный ресурс записан некэшированным",
+        "app/services/site_speed.py",
+        '        out["uncached"] += 0 if cache == "cached" else 1',
+        '        out["uncached"] += 1',
+    ),
+    (
+        "speed: невзвешенный ресурс записан взвешенным",
+        "app/services/site_speed.py",
+        '        out["weighed"] += 1 if size else 0',
+        '        out["weighed"] += 1',
+    ),
+    (
+        "speed: размер назван там, где сервер его молчит",
+        "app/services/site_speed.py",
+        '        out["size_unknown"] += 0 if size else 1',
+        '        out["size_unknown"] += 0',
+    ),
+    (
+        "speed: ресурс без веса не отличается от сжатого",
+        "app/services/site_speed.py",
+        '        out["weightless"] += 1 if (not encoding and not size) else 0',
+        '        out["weightless"] += 1 if not encoding else 0',
+    ),
+    (
+        "speed: вес в сети подменён весом разметки",
+        "app/services/site_speed.py",
+        '        "wire_bytes": int(probe.get("wire_bytes") or 0),',
+        '        "wire_bytes": int(probe.get("wire_bytes") or probe.get("content_bytes") or 0),',
+    ),
+    (
+        "speed: незваный вес в сети показан числом в строке",
+        "app/services/site_speed.py",
+        '            + (f"{_kb(wire)} в сети, " if wire else "вес в сети не назван, ")',
+        '            + (f"{_kb(wire)} в сети, " if not wire else "вес в сети не назван, ")',
+    ),
+    (
+        "speed: молчание статики записано неназванным размером",
+        "app/services/site_speed.py",
+        "    if checked and silent == checked:",
+        "    if False:",
+    ),
+    (
+        "speed: незамеренный вес статики скрыт из честного блока",
+        "app/services/site_speed.py",
+        '    elif checked and not assets.get("weighed"):',
+        "    elif False:",
+    ),
+    (
+        "speed: сорванная проба ресурсов не попала в честный блок",
+        "app/services/site_speed.py",
+        '    elif assets.get("found") and not checked:',
+        "    elif False:",
+    ),
+    (
+        "speed: промпт выдал неизмеренный вес статики за ноль",
+        "app/services/site_speed.py",
+        '        size = (f"{_kb(assets.get(\'bytes\'))}, вес назван у {weighed}" if weighed\n'
+        '                else "вес не назвал ни один ресурс")',
+        '        size = (f"{_kb(assets.get(\'bytes\'))}, вес назван у {weighed}" if not weighed\n'
+        '                else "вес не назвал ни один ресурс")',
+    ),
+    (
+        "speed: промпт назвал неизвестный вес в сети измеренным",
+        "app/services/site_speed.py",
+        '        wire = (f"{_kb(page.get(\'wire_bytes\'))} в сети"\n'
+        '                if count(page, "wire_bytes") else "вес в сети не назван")',
+        '        wire = (f"{_kb(page.get(\'wire_bytes\'))} в сети"\n'
+        '                if not count(page, "wire_bytes") else "вес в сети не назван")',
+    ),
+    (
+        "speed: найденные, но не опробованные ресурсы скрыты",
+        "app/services/site_speed.py",
+        '    elif assets.get("found"):',
+        "    elif False:",
+    ),
+    (
+        "speed: молчание всех ресурсов притворилось выводом",
+        "app/services/site_speed.py",
+        "        if silent == total:",
+        "        if False:",
+    ),
+    (
+        "speed: битый ресурс пропал из таблицы",
+        "app/services/site_speed.py",
+        '        for item in (assets.get("dead") or [])[:3]:',
+        "        for item in []:",
+    ),
+    (
+        "speed: мёртвый ресурс не стал ошибкой пробы",
+        "app/services/site_speed.py",
+        '        elif assets.get("dead"):\n            row(label, seen, BAD,',
+        '        elif False:\n            row(label, seen, BAD,',
+    ),
+    (
+        "speed: незваный вес статики показан находкой",
+        "app/services/site_speed.py",
+        "        elif loose or uncached or weightless:",
+        "        elif False:",
+    ),
+    (
+        "speed: неизмеренный вес статики стал нормой",
+        "app/services/site_speed.py",
+        "        elif not weighed:\n            row(label, seen, UNKNOWN,",
+        "        elif False:\n            row(label, seen, UNKNOWN,",
+    ),
+    (
+        "speed: причина находки не совпала с выводом пробы",
+        "app/services/site_speed.py",
+        '            row(label, seen, CHECK, "статика: " + "; ".join(causes))',
+        '            row(label, seen, CHECK, "сжатая и кэшированная статика докачивается один раз")',
+    ),
+    (
+        "speed: число взвешенных ресурсов нарисовано от probe",
+        "app/services/site_speed.py",
+        '            f"вес назван у {weighed} ({_kb(assets.get(\'bytes\') or 0)})" if weighed\n'
+        '            else "вес не назвал ни один ресурс"',
+        '            f"вес назван у {weighed} ({_kb(assets.get(\'bytes\') or 0)})" if not weighed\n'
+        '            else "вес не назвал ни один ресурс"',
+    ),
+    (
+        "speed: ресурсы без веса и без сжатия скрыты из строки",
+        "app/services/site_speed.py",
+        '        if weightless:\n            seen += f", без веса и без сжатия {weightless}"',
+        "        if False:\n"
+        '            seen += f", без веса и без сжатия {weightless}"',
+    ),
+    (
+        "psi: «тест не ответил» сравнялся с ошибкой Google",
+        "app/services/site_speed.py",
+        '    if not status:\n        return "unreachable"',
+        '    if not status:\n        return "error"',
+    ),
+    (
+        "psi: дневная квота записана ошибкой теста",
+        "app/services/site_speed.py",
+        '    if status == 429:\n        return "quota"',
+        '    if status == 429:\n        return "error"',
+    ),
+    (
+        "psi: отклонённый ключ записан исчерпанной квотой",
+        "app/services/site_speed.py",
+        '    if status in (401, 403):\n        return "blocked"',
+        '    if status in (401, 403):\n        return "quota"',
+    ),
+    (
+        "psi: пустой конверт стал отчётом с баллом",
+        "app/services/site_speed.py",
+        "    if not (result.get(\"audits\") or result.get(\"categories\") or experience.get(\"metrics\")):\n"
+        '        return "foreign"',
+        "    if False:\n        return \"foreign\"",
+    ),
+    (
+        "psi: тело ответа не обязано быть объектом",
+        "app/services/site_speed.py",
+        "    body = probe.get(\"body\") if isinstance(probe.get(\"body\"), dict) else {}",
+        "    body = probe.get(\"body\") or {}",
+    ),
+    (
+        "psi: балл не переведён из доли в сотню",
+        "app/services/site_speed.py",
+        '        out["score"] = int(round(float(score) * 100))',
+        "        out[\"score\"] = int(float(score))",
+    ),
+    (
+        "psi: лабораторный CLS сведён к целому",
+        "app/services/site_speed.py",
+        '        out["lab"][key] = round(number, 4) if key == "CLS" else int(round(number))',
+        '        out["lab"][key] = int(round(number))',
+    ),
+    (
+        "psi: сотые доли CLS реальных посетителей потеряны",
+        "app/services/site_speed.py",
+        '            "value": round(number / 100, 4) if key == "CLS" else int(round(number)),',
+        '            "value": int(round(number)),',
+    ),
+    (
+        "psi: отсутствующая метрика выдумана нулём",
+        "app/services/site_speed.py",
+        '        value = item.get("numericValue")\n        if value is None:\n            continue',
+        '        value = item.get("numericValue")\n        if value is None:\n            value = 0',
+    ),
+    (
+        "psi: недоступный тест объявлен ошибкой сайта",
+        "app/services/site_speed.py",
+        '            PSI_STATE_TEXT.get(state, "нет данных"),\n            UNKNOWN,',
+        '            PSI_STATE_TEXT.get(state, "нет данных"),\n            BAD,',
+    ),
+    (
+        "vitals: вывод взят по лучшей метрике, а не по худшей",
+        "app/services/site_speed.py",
+        "    return max(known, key=lambda grade: VERDICT_RANK[grade]) if known else UNKNOWN",
+        "    return min(known, key=lambda grade: VERDICT_RANK[grade]) if known else UNKNOWN",
+    ),
+    (
+        "vitals: оценка реальных посетителей не различается",
+        "app/services/site_speed.py",
+        'GRADE_VERDICT = {"fast": OK, "average": CHECK, "slow": BAD}',
+        'GRADE_VERDICT = {"fast": OK, "average": OK, "slow": OK}',
+    ),
+    (
+        "vitals: секунды показаны миллисекундами",
+        "app/services/site_speed.py",
+        '    return f"{float(value) / 1000:.1f} с" if float(value) >= 1000 else f"{int(float(value))} мс"',
+        '    return f"{int(float(value))} мс"',
+    ),
+    (
+        "vitals: границы метрик перестали влиять на вывод",
+        "app/services/site_speed.py",
+        "    return OK if value <= limits[0] else CHECK if value <= limits[1] else BAD",
+        "    return OK",
+    ),
+    (
+        "speed: неудачный замер выдал полную таблицу выводов",
+        "app/services/site_speed.py",
+        '    if speed.get("failed"):\n        return {\n            "columns": columns,',
+        "    if False:\n        return {\n            \"columns\": columns,",
+    ),
+    (
+        "speed: неудачный замер исчез из честного блока",
+        "app/services/site_speed.py",
+        '    if speed.get("failed"):\n        return [\n            "Замер скорости не завершился',
+        "    if False:\n        return [\n            \"Замер скорости не завершился",
+    ),
+    (
+        "speed: отсутствие замера породило пробелы ни о чём",
+        "app/services/site_speed.py",
+        "def speed_gaps(speed: Dict) -> List[str]:\n"
+        '    """Чего этот раздел утверждать не может — честно списком."""\n    if not speed:',
+        "def speed_gaps(speed: Dict) -> List[str]:\n"
+        '    """Чего этот раздел утверждать не может — честно списком."""\n    if False:',
+    ),
+    (
+        "speed: недоступный PageSpeed не назван пробелом",
+        "app/services/site_speed.py",
+        '    if psi.get("state") != "ok":',
+        "    if False:",
+    ),
+    (
+        "speed: данных о посетителях не хватает — пробел молчит",
+        "app/services/site_speed.py",
+        "    if not (psi.get(\"field\") or {}):",
+        "    if False:",
+    ),
+    (
+        "speed: незамеренная главная выпала из честного блока",
+        "app/services/site_speed.py",
+        "    if not (speed.get(\"page\") or {}).get(\"measured\"):",
+        "    if False:",
+    ),
+    (
+        "speed: промпт пишет о замере, которого не было",
+        "app/services/site_speed.py",
+        '    if page.get("measured"):\n        wire = (',
+        "    if True:\n        wire = (",
+    ),
+    (
+        "speed: неразабранная разметка выдана прочитанной",
+        "app/services/site_speed.py",
+        '    if markup.get("parsed"):\n        hosts = ',
+        "    if True:\n        hosts = ",
+    ),
+    (
+        "speed: проба ресурсов описана, хотя её не делали",
+        "app/services/site_speed.py",
+        '    if assets.get("checked"):\n        # Модель обязана отличать',
+        "    if True:\n        # Модель обязана отличать",
+    ),
+    (
+        "speed: PSI без ответа выдал балл ноль",
+        "app/services/site_speed.py",
+        '    if state == "ok":\n        lines.append(\n            f"PageSpeed Insights: балл ',
+        '    if True:\n        lines.append(\n            f"PageSpeed Insights: балл ',
+    ),
+    (
+        "speed: из сломанного замера сделали видимость проверки",
+        "app/services/site_speed.py",
+        '    if speed.get("failed"):\n        return "## Скорость и мобильность\\nЗамер не завершился',
+        '    if False:\n        return "## Скорость и мобильность\\nЗамер не завершился',
+    ),
+    (
+        "speed: этап PSI не независим — его сбой отменяет замеры",
+        "app/services/site_speed.py",
+        '    except Exception:  # noqa: BLE001 - тест мог не ответить, цифры веса это не отменяет\n'
+        '        speed["psi"] = {"state": "error", "score": 0, "lab": {}, "field": {}}',
+        "    except Exception:  # noqa: BLE001 - тест мог не ответить, цифры веса это не отменяет\n"
+        "        raise",
+    ),
+    # --- Скорость в анализаторе и отчёте ------------------------------------
+    (
+        "analyzer: замеры скорости не дошли до промптов",
+        "app/services/analyzer.py",
+        '        speed = facts.get("speed") or {}\n'
+        "        if speed and not speed.get(\"failed\"):\n"
+        "            blocks.append(site_speed.render_speed(speed))",
+        "        speed = {}",
+    ),
+    (
+        "analyzer: пробелы скорости теряются в data_gaps",
+        "app/services/analyzer.py",
+        '            + site_speed.speed_gaps(facts.get("speed"))',
+        "            + []",
+    ),
+    (
+        "analyzer: раздел скорости не попадает в отчёт",
+        "app/services/analyzer.py",
+        '            speed_checks = site_speed.build_speed_checks(speed) if speed else {"rows": []}\n'
+        '            if speed_checks["rows"]:',
+        '            speed_checks = site_speed.build_speed_checks(speed) if speed else {"rows": []}\n'
+        "            if False:",
+    ),
+    (
+        "analyzer: раздел скорости выпал из порядка чтения",
+        "app/services/analyzer.py",
+        '    "site_crawl",\n    "site_speed",\n',
+        '    "site_crawl",\n',
+    ),
+    (
+        "analyzer: сбой замера скорости роняет весь аудит",
+        "app/services/analyzer.py",
+        "        except Exception:  # noqa: BLE001 - сбой замера не стоит всего анализа\n"
+        '            facts["speed"] = {"failed": True}',
+        "        except Exception:  # noqa: BLE001 - сбой замера не стоит всего анализа\n            raise",
+    ),
+    (
+        "analyzer: вес в сети взят из длины тела, а не из заголовка",
+        "app/services/analyzer.py",
+        '                "wire_bytes": wire or (0 if encoding else len(body)),',
+        '                "wire_bytes": len(body),',
+    ),
+    (
+        "analyzer: сжатие главной не спросили — и не заметили его",
+        "app/services/analyzer.py",
+        "            headers={'User-Agent': SITE_USER_AGENT, 'Accept-Encoding': 'gzip, deflate, br'},",
+        "            headers={'User-Agent': SITE_USER_AGENT},",
+    ),
+    (
+        "analyzer: редиректы замера не посчитаны",
+        "app/services/analyzer.py",
+        '                "redirects": len(response.history),',
+        '                "redirects": 0,',
+    ),
+    (
+        "analyzer: версия протокола не переведена из числа",
+        "app/services/analyzer.py",
+        '                "http_version": site_speed.HTTP_VERSIONS.get(int(version), ""),',
+        '                "http_version": "",',
+    ),
+    (
+        "analyzer: тело главной не дочитано — вес оказался заголовками",
+        "app/services/analyzer.py",
+        '            body = b"".join(chunk for chunk in response.iter_content(65536) if chunk)',
+        "            body = b\"\"",
+    ),
+    (
+        "analyzer: сжатие не запрошено — «без сжатия» оказалось нашей ошибкой",
+        "app/services/analyzer.py",
+        "            headers={'User-Agent': SITE_USER_AGENT, 'Accept-Encoding': 'gzip, deflate, br'},",
+        "            headers={'User-Agent': SITE_USER_AGENT},",
+    ),
+    (
+        "analyzer: молчащий ресурс роняет раздел скорости",
+        "app/services/analyzer.py",
+        '            return {"status": 0, "bytes": 0, "encoding": "", "cache_control": "", "expires": ""}',
+        "            raise",
+    ),
+    (
+        "analyzer: пробу ресурсов делают со скачиванием тела",
+        "app/services/analyzer.py",
+        "                stream=True,\n                allow_redirects=True,",
+        "                stream=False,\n                allow_redirects=True,",
+    ),
+    (
+        "analyzer: PageSpeed просят для десктопа",
+        "app/services/analyzer.py",
+        '        params = {"url": url, "strategy": "mobile", "category": "PERFORMANCE"}',
+        '        params = {"url": url, "strategy": "desktop", "category": "PERFORMANCE"}',
+    ),
+    (
+        "analyzer: пустой ключ PSI уходят в запрос",
+        "app/services/analyzer.py",
+        '        if key:\n            params["key"] = key',
+        '        params["key"] = key',
+    ),
+    (
+        "analyzer: сбой запроса PSI роняет аудит вместо честной строки",
+        "app/services/analyzer.py",
+        "        except Exception:\n            return {\"status\": 0, \"body\": {}}",
+        "        except Exception:\n            raise",
+    ),
+    (
+        "pdf: раздел скорости вышел в PDF сырым ключом",
+        "app/services/pdf_report.py",
+        '        "site_speed": "Скорость и мобильность сайта (посчитано кодом)",',
+        "",
+    ),
 ]
 
 
@@ -1285,12 +1983,14 @@ def main():
             "tests/test_site_signals.py",
             "tests/test_site_infra.py",
             "tests/test_site_crawl.py",
+            "tests/test_site_speed.py",
         ),
         "app/routers/history.py": ("tests/test_history_pdf_endpoint.py",),
         "app/services/pdf_report.py": ("tests/test_pdf_report.py", "tests/test_site_infra.py"),
         "app/services/site_signals.py": ("tests/test_site_signals.py",),
         "app/services/site_infra.py": ("tests/test_site_infra.py",),
         "app/services/site_crawl.py": ("tests/test_site_crawl.py",),
+        "app/services/site_speed.py": ("tests/test_site_speed.py",),
     }
     survived = []
 

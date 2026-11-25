@@ -1,12 +1,14 @@
 import ipaddress
+import os
 import re
 import socket
+import time
 from urllib.parse import urljoin, urlparse, urldefrag
 
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Tuple
-from app.services import site_crawl, site_infra, site_signals
+from app.services import site_crawl, site_infra, site_signals, site_speed
 from app.services.llm_client import LLMClient
 
 
@@ -149,6 +151,7 @@ REPORT_SECTION_ORDER = (
     "site_checks",
     "site_infra",
     "site_crawl",
+    "site_speed",
     "ad_instructions",
     "keyword_seeds",
     "negative_keywords",
@@ -315,6 +318,103 @@ class SiteAnalyzer:
             # Неудача пробы — это данные, а не исключение: отчёт обязан уметь
             # сказать «ответ не получен», а не упасть из-за одного адреса.
             return {"status": 0, "text": "", "chain": chain, "url": current or url}
+
+    def fetch_measured(self, url: str) -> Dict:
+        """Тот же запрос, но с часами: сколько сервер думает, сколько весит, чем отвечает.
+
+        fetch_site_html отдаёт текст и теряет заголовки, а для раздела скорости
+        нужны именно они: время до первого байта, вес в сети и в разметке,
+        сжатие, протокол, число редиректов. Тело дочитывают до конца — иначе
+        «вес страницы» окажется длиной заголовков. Сам текст не возвращается:
+        разметку этого же аудита уже прочитал обход, дублировать её нечем.
+        """
+        url = self._validate_url(url)
+        started = time.monotonic()
+        response = requests.get(
+            url,
+            # Сжатие запрашивают прямо здесь: без Accept-Encoding сервер отдал бы
+            # несжатый HTML, и «без сжатия» оказалось бы нашей ошибкой.
+            headers={'User-Agent': SITE_USER_AGENT, 'Accept-Encoding': 'gzip, deflate, br'},
+            timeout=SITE_FETCH_TIMEOUT,
+            allow_redirects=True,
+            stream=True,
+            hooks={'response': self._check_redirect_target},
+        )
+        try:
+            ttfb = int((time.monotonic() - started) * 1000)
+            body = b"".join(chunk for chunk in response.iter_content(65536) if chunk)
+            version = getattr(getattr(response, "raw", None), "version", 0) or 0
+            # Content-Length — это вес в сети (сжатый). Если заголовка нет, но и
+            # сжатия нет, по сети шло ровно прочитанное тело; при сжатии без
+            # заголовка вес остаётся неизвестным — так и пойдёт в отчёт.
+            encoding = (response.headers.get("Content-Encoding") or "").lower()
+            wire = site_speed.content_length(response.headers.get("Content-Length"))
+            return {
+                "status": response.status_code,
+                "ttfb_ms": ttfb,
+                "total_ms": int((time.monotonic() - started) * 1000),
+                "content_bytes": len(body),
+                "wire_bytes": wire or (0 if encoding else len(body)),
+                "redirects": len(response.history),
+                "final_url": response.url or url,
+                "http_version": site_speed.HTTP_VERSIONS.get(int(version), ""),
+                "headers": dict(response.headers),
+            }
+        finally:
+            response.close()
+
+    def fetch_headers(self, url: str) -> Dict:
+        """Заголовки ресурса без скачивания тела: вес и кэш живут только в них.
+
+        Неудача — это ответ, а не исключение: один молчащий чужой CDN не должен
+        снимать весь раздел скорости.
+        """
+        try:
+            url = self._validate_url(url)
+            response = requests.get(
+                url,
+                headers={'User-Agent': SITE_USER_AGENT},
+                timeout=PROBE_TIMEOUT,
+                stream=True,
+                allow_redirects=True,
+                hooks={'response': self._check_redirect_target},
+            )
+            try:
+                return {
+                    "status": response.status_code,
+                    "bytes": site_speed.content_length(response.headers.get("Content-Length")),
+                    "encoding": (response.headers.get("Content-Encoding") or "").lower(),
+                    "cache_control": response.headers.get("Cache-Control") or "",
+                    "expires": response.headers.get("Expires") or "",
+                    "content_type": response.headers.get("Content-Type") or "",
+                }
+            finally:
+                response.close()
+        except Exception:
+            return {"status": 0, "bytes": 0, "encoding": "", "cache_control": "", "expires": ""}
+
+    def run_pagespeed(self, url: str) -> Dict:
+        """Один запрос к PageSpeed Insights — бесплатно, в общей квоте Google.
+
+        Без ключа Google чаще отвечает «429», чем считает тест: дневная квота
+        анонимного проекта одна на всех. Свой ключ PAGESPEED_API_KEY снимает
+        ограничение, но не обязателен — раздел скорости считает код, а не PSI.
+        """
+        params = {"url": url, "strategy": "mobile", "category": "PERFORMANCE"}
+        key = (os.getenv("PAGESPEED_API_KEY") or "").strip()
+        if key:
+            params["key"] = key
+        try:
+            response = requests.get(
+                site_speed.PSI_ENDPOINT, params=params, timeout=site_speed.PSI_TIMEOUT
+            )
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            return {"status": response.status_code, "body": body if isinstance(body, dict) else {}}
+        except Exception:
+            return {"status": 0, "body": {}}
 
     def internal_links(self, base_url: str, pages: List[Tuple[str, str]], skip: List[str], limit: int) -> List[str]:
         """Внутренние адреса прочитанных страниц — их проверяют запросами.
@@ -586,6 +686,9 @@ class SiteAnalyzer:
         infra = facts.get("infra") or {}
         if infra and not infra.get("failed"):
             blocks.append(site_infra.render_infra(infra))
+        speed = facts.get("speed") or {}
+        if speed and not speed.get("failed"):
+            blocks.append(site_speed.render_speed(speed))
         return "\n\n".join(blocks)
 
     @staticmethod
@@ -822,6 +925,24 @@ class SiteAnalyzer:
             )
         except Exception:  # noqa: BLE001 - сбой проверки не стоит всего анализа
             facts["infra"] = {"failed": True}
+
+        # Скорость и мобильность: отдельный замер главной, проба веса ресурсов и
+        # запрос в PageSpeed Insights. Идут после текста — страница для анализа
+        # нужнее проверки, а PSI может отвечать минуту и не ответить вовсе.
+        try:
+            measured = self.fetch_measured(url)
+        except Exception:  # noqa: BLE001 - часы не должны ронять аудит
+            measured = {}
+        try:
+            facts["speed"] = site_speed.assess(
+                f"{start.scheme}://{start.netloc}",
+                html,
+                measured,
+                self.fetch_headers,
+                lambda: self.run_pagespeed(url),
+            )
+        except Exception:  # noqa: BLE001 - сбой замера не стоит всего анализа
+            facts["speed"] = {"failed": True}
 
         # Главная получает первый номер: ссылки вида «Источник 1» должны
         # вести на неё, а не на первую попавшуюся внутреннюю страницу.
@@ -1239,6 +1360,7 @@ class SiteAnalyzer:
             + site_crawl.crawl_gaps(facts.get("crawl"))
             + site_signals.signal_gaps(facts.get("signals"))
             + site_infra.infra_gaps(facts.get("infra"))
+            + site_speed.speed_gaps(facts.get("speed"))
         )
         return cls._unique(seeded + list(model_gaps))
 
@@ -1545,6 +1667,12 @@ class SiteAnalyzer:
             crawl_checks = site_crawl.build_crawl_checks(facts.get("crawl"))
             if crawl_checks["rows"]:
                 result["site_crawl"] = crawl_checks
+            # Скорость тоже считает код: модель не делала ни одного замера и не
+            # знает, сколько сервер думал и сколько весят скрипты.
+            speed = facts.get("speed") or {}
+            speed_checks = site_speed.build_speed_checks(speed) if speed else {"rows": []}
+            if speed_checks["rows"]:
+                result["site_speed"] = speed_checks
 
         for key in ("site_gaps", "risks_and_checks", "data_gaps"):
             values = cls._normalize_string_list(result.get(key))
