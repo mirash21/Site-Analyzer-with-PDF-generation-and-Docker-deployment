@@ -10,6 +10,11 @@
 знаменатель, но попадает в честный блок — оценка по трём проверкам из
 тринадцати была бы обманом. Ось, где посчитано меньше трёх строк, в итог не
 идёт совсем, а не раздувается до сотни.
+
+Первая страница и чек-лист — те же находки, что и в очереди: краткий вывод
+обязан называть то же число, что таблица осей ниже, а список работ — все
+находки, а не восемь первых. Глагол работы берётся из вывода кода: «ошибка»
+чинят, отсутствующее добавляют, спорное проверяют.
 """
 
 from typing import Dict, List, Tuple
@@ -59,6 +64,11 @@ URGENT = "до запуска рекламы"
 SOON = "первые две недели"
 LATER = "по мере сил"
 MAX_CELL = 170
+# Глагол чек-листа берётся из вывода кода, а не из фантазии о сайте: «ошибка»
+# чинят, отсутствующее добавляют, спорное проверяют.
+ACTION_VERB = {BAD: "Исправить", MISSING: "Добавить", CHECK: "Проверить"}
+CHECKBOX = "[ ]"
+DEADLINES = (URGENT, SOON, LATER)
 
 
 def verdict_of(row) -> str:
@@ -187,33 +197,35 @@ def _action_cell(row: List) -> str:
     return text[:MAX_CELL]
 
 
-def priority_rows(axes: List[Dict], limit: int = MAX_PRIORITY_ROWS) -> List[List[str]]:
-    """Очередь работ: тяжесть находки умножается на вес её оси, а не на красноречие."""
-    found: List[List] = []
-    for axis in axes:
+def _findings(queue: List[Dict]) -> List[Tuple]:
+    """Все находки в порядке срочности: вес оси умножается на тяжесть вывода."""
+    found: List[Tuple] = []
+    for axis in queue:
         for row in axis["counts"]["rows"]:
-            severity = URGENCY_SEVERITY.get(verdict_of(row))
+            verdict = verdict_of(row)
+            severity = URGENCY_SEVERITY.get(verdict)
             if severity is None:
                 continue
-            urgency = round(axis["weight"] * severity, 4)
-            found.append([
-                urgency,
-                due_for(axis["weight"], severity),
-                f"{str(row[0] or '').strip()} · {axis['name']}",
-                _action_cell(row),
-            ])
+            found.append((round(axis["weight"] * severity, 4), axis, row, verdict, severity))
     found.sort(key=lambda item: -item[0])
-    return [item[1:] for item in found[:limit]]
+    return found
+
+
+def priority_rows(axes: List[Dict], limit: int = MAX_PRIORITY_ROWS) -> List[List[str]]:
+    """Очередь работ: тяжесть находки умножается на вес её оси, а не на красноречие."""
+    return [
+        [
+            due_for(axis["weight"], severity),
+            f"{str(row[0] or '').strip()} · {axis['name']}",
+            _action_cell(row),
+        ]
+        for _, axis, row, _verdict, severity in _findings(axes)[:limit]
+    ]
 
 
 def findings_count(axes: List[Dict]) -> int:
     """Сколько находок дала бы очередь без потолка строк."""
-    return sum(
-        1
-        for axis in axes
-        for row in axis["counts"]["rows"]
-        if verdict_of(row) in URGENCY_SEVERITY
-    )
+    return len(_findings(axes))
 
 
 def priorities_table(axes: List[Dict]) -> Dict:
@@ -244,6 +256,86 @@ def priorities_table(axes: List[Dict]) -> Dict:
                   f"засчитано проверок: {measured} — что проверять руками, "
                   "читается в рисках"]],
     }
+
+
+def deadline_counts(queue: List[Dict]) -> Dict:
+    """Сколько работ в каждом сроке — тем же множителем, что и в очереди."""
+    out = {name: 0 for name in DEADLINES}
+    for _, axis, _row, _verdict, severity in _findings(queue):
+        out[due_for(axis["weight"], severity)] += 1
+    return out
+
+
+def _where_cell(axis: Dict, row: List) -> str:
+    seen = str(row[1] or "").strip()
+    text = f"{axis['name']} · вес оси {int(round(axis['weight'] * 100))}%"
+    return f"{text} · {seen}"[:MAX_CELL] if seen else text
+
+
+def checklist_rows(queue: List[Dict]) -> List[List[str]]:
+    """Чек-лист для исполнителя: все находки, без потолка, с глаголом работы."""
+    return [
+        [
+            f"{CHECKBOX} {due_for(axis['weight'], severity)}",
+            f"{ACTION_VERB[verdict]}: {str(row[0] or '').strip()}",
+            _where_cell(axis, row),
+        ]
+        for _, axis, row, verdict, severity in _findings(queue)
+    ]
+
+
+def checklist_table(queue: List[Dict]) -> Dict:
+    columns = ["Отметка и срок", "Что сделать", "Где искать и в каком объёме"]
+    rows = checklist_rows(queue)
+    if rows:
+        return {"columns": columns, "rows": rows}
+    if not any(axis["counts"]["total"] for axis in queue):
+        return {
+            "columns": columns,
+            "rows": [[CHECKBOX, "Чек-лист не посчитан",
+                      f"{UNKNOWN}: готовых таблиц проверок в отчёте нет"]],
+        }
+    measured = sum(axis["counts"]["measured"] for axis in queue)
+    if not measured:
+        return {
+            "columns": columns,
+            "rows": [[CHECKBOX, "Работы не записаны",
+                      f"{UNKNOWN}: вывода нет ни по одной строке проверки"]],
+        }
+    return {
+        "columns": columns,
+        "rows": [[CHECKBOX, "Грубых находок код не нашёл",
+                  f"засчитано проверок: {measured} — список ручных проверок "
+                  "читается в рисках"]],
+    }
+
+
+def summary_table(summary: Dict, caveats: List[str], queue: List[Dict]) -> Dict:
+    """Первая страница: то же число, что и в таблице осей ниже, без новых слов."""
+    columns = ["Что решает отчёт", "Посчитано кодом"]
+    findings = _findings(queue)
+    urgent = [item for item in findings if due_for(item[1]["weight"], item[4]) == URGENT]
+    due = deadline_counts(queue)
+    rows: List[List[str]] = [
+        ["Балл готовности к трафику",
+         (f"{summary['total']}/100 — {grade(summary['total'], summary['mistakes'])}"
+          if summary["axes"] else f"{UNKNOWN}: балл не посчитан")],
+        ["Что мешает запустить рекламу",
+         (f"{str(urgent[0][2][0] or '').strip()} — всего таких находок {len(urgent)}" if urgent
+          else (f"{UNKNOWN}: таблиц проверок в отчёте нет"
+                if not any(item["counts"]["total"] for item in queue)
+                else ("выводов нет ни по одной проверке"
+                      if not sum(item["counts"]["measured"] for item in queue)
+                      else "грубых находок код не нашёл")))],
+        ["Порядок работ",
+         (", ".join(f"{name}: {due[name]}" for name in DEADLINES)
+          if any(item["counts"]["total"] for item in queue)
+          else f"{UNKNOWN}: записывать нечего")],
+        ["Чему в этом балле верить нельзя",
+         (f"ограничений: {len(caveats)} — они в разделе «Каких данных нет»" if caveats
+          else "ни одна ось не отсеяна, очередь не урезана")],
+    ]
+    return {"columns": columns, "rows": rows}
 
 
 def score_caveats(axes: List[Dict], summary: Dict) -> List[str]:
@@ -296,6 +388,8 @@ def assess(result: Dict) -> Dict:
     return {
         "score": score_table(axes),
         "priorities": priorities_table(queue),
+        "checklist": checklist_table(queue),
+        "summary": summary_table(summary, caveats, queue),
         "total": summary["total"],
         "mistakes": summary["mistakes"],
         "axes": axes,

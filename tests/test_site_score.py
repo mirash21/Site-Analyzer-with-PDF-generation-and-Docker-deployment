@@ -77,10 +77,18 @@ def filled(key, name, weight, verdict, count):
     ])
 
 
+def queue_of(result):
+    """Оси в том же составе, что собирает assess: балльные плюс обход."""
+    axes = [rating.axis_of(result, key, name, weight) for key, name, weight in rating.AXES]
+    return axes + [rating.axis_of(result, key, name, weight)
+                   for key, name, weight in rating.EXTRA_AXES]
+
+
 def robots_fetch(url, method="GET"):
     if url.endswith("/robots.txt"):
         return {"status": 200,
-                "text": "User-agent: *\nDisallow: /admin/\nSitemap: https://tateng.ru/sitemap.xml\n",
+                "text": "User-agent: *\nDisallow: /admin/\n"
+                        "Sitemap: https://tateng.ru/sitemap.xml\n",
                 "chain": []}
     if url.endswith("/sitemap.xml"):
         return {"status": 200,
@@ -424,6 +432,206 @@ def test_a_clean_site_gets_an_empty_queue_explained_in_words():
     assert "засчитано проверок: 4" in made_up["rows"][0][2]
 
 
+# --- чек-лист и первая страница ---------------------------------------------
+
+
+def findings_report():
+    """Отчёт, в котором есть находка каждого вывода — и молчание тоже."""
+    return {
+        "site_infra": table(
+            row("robots.txt", "есть", "норма — открыт"),
+            row("Sitemap", "404", "проверить — медленно"),
+            row("Ссылки", "2 битых", "ошибка — заявка потеряна"),
+            row("Редирект", "3", "норма — один прыжок")),
+        "site_checks": table(
+            row("Счётчики и пиксели", "ни одного", "не найдено — вслепую"),
+            row("Формы заявок", "2", "норма — принимают"),
+            row("Мобильная вёрстка (viewport)", "нет", "проверить — телефон"),
+            row("Картинки без alt", "13 из 20", "проверить — поиск")),
+        "site_speed": table(
+            row("Ответ сервера", "900 мс", "ошибка — ждёт"),
+            row("Картинки без размеров", "51 из 51", "проверить — прыгают"),
+            row("Вес главной страницы", "12 КБ", "норма — лёгкая"),
+            row("PageSpeed Insights (мобильные)", "квота", "не проверено — нет теста")),
+        "site_crawl": table(
+            row("Дубликаты содержания", "3", "проверить — одно и то же"),
+            row("Глубина обхода", "2 страницы", "норма — мало")),
+    }
+
+
+def test_checklist_lists_every_finding_without_the_queue_cap():
+    rows = [row(f"проверка {i}", "нет", "ошибка — сломано")
+            for i in range(rating.MAX_PRIORITY_ROWS + 7)]
+    out = rating.assess({"site_infra": table(*rows)})
+
+    assert len(out["priorities"]["rows"]) == rating.MAX_PRIORITY_ROWS
+    assert len(out["checklist"]["rows"]) == rating.MAX_PRIORITY_ROWS + 7
+
+
+def test_checklist_verb_comes_from_the_verdict_and_not_from_imagination():
+    out = rating.checklist_rows([
+        made("site_infra", "Индексация", 0.35, row("a", "2", "ошибка — сломано")),
+        made("site_checks", "Маркировка", 0.35, row("b", "нет", "не найдено — пусто")),
+        made("site_speed", "Скорость", 0.30, row("c", "нет og", "проверить — странно")),
+    ])
+
+    assert [item[1] for item in out] == ["Исправить: a", "Добавить: b", "Проверить: c"]
+
+
+def test_checklist_box_and_deadline_share_one_cell():
+    out = rating.checklist_rows([
+        made("site_infra", "Индексация", 0.35, row("a", "2", "ошибка — сломано")),
+        made("site_crawl", "Обход", 0.15, row("b", "нет og", "проверить — странно")),
+    ])
+
+    assert out[0][0] == f"[ ] {rating.URGENT}"
+    assert out[1][0] == f"[ ] {rating.LATER}"
+
+
+def test_checklist_keeps_axis_weight_and_the_measured_number():
+    out = rating.checklist_rows([
+        made("site_speed", "Скорость и мобильность", 0.30,
+             row("Картинки без размеров", "51 из 51 (100%)", "ошибка — прыгают")),
+    ])
+
+    assert out[0][2] == "Скорость и мобильность · вес оси 30% · 51 из 51 (100%)"
+
+
+def test_checklist_cell_is_capped_like_the_queue():
+    axes = [made("site_infra", "Индексация", 0.35,
+                 row("a", "д" * (rating.MAX_CELL + 90), "ошибка — сломано"))]
+
+    assert max(len(cell) for cell in rating.checklist_rows(axes)[0]) <= rating.MAX_CELL
+
+
+def test_checklist_orders_by_the_same_urgency_as_the_queue():
+    out = rating.checklist_table(queue_of(findings_report()))
+    deadlines = [item[0].replace("[ ] ", "") for item in out["rows"]]
+
+    assert deadlines == [rating.URGENT, rating.URGENT, rating.URGENT] + [rating.SOON] * 4 + \
+        [rating.LATER], "срок обязан идти группами: исполнитель читает сверху вниз"
+
+
+def test_checklist_without_tables_says_it_was_not_counted():
+    out = rating.checklist_table([rating.axis_of({}, "site_infra", "Индексация", 0.35)])
+
+    assert out["columns"] == ["Отметка и срок", "Что сделать", "Где искать и в каком объёме"]
+    assert out["rows"] == [["[ ]", "Чек-лист не посчитан",
+                           "не проверено: готовых таблиц проверок в отчёте нет"]]
+
+
+def test_checklist_of_a_silent_report_writes_no_work():
+    axes = [made("site_infra", "Индексация", 0.35,
+                 *[row(f"a{i}", "нет", "не проверено — молчит") for i in range(4)])]
+
+    assert rating.checklist_table(axes)["rows"][0][1] == "Работы не записаны"
+
+
+def test_checklist_of_a_clean_site_counts_what_stood():
+    axes = [filled("site_infra", "Индексация", 0.35, "норма", 4)]
+    row_cell = rating.checklist_table(axes)["rows"][0][2]
+
+    assert "Грубых находок код не нашёл" in rating.checklist_table(axes)["rows"][0][1]
+    assert "засчитано проверок: 4" in row_cell
+
+
+def test_checklist_of_a_whole_report_keeps_the_crawl_work():
+    """Assess обязан сдавать в чек-лист всю очередь, а не только балльные оси."""
+    out = rating.assess({
+        "site_infra": table(*[row(f"a{i}", "1", "норма — есть") for i in range(4)]),
+        "site_crawl": table(row("Битые ссылки", "2", "ошибка — ведёт в никуда")),
+    })
+    cells = "\n".join(" · ".join(item) for item in out["checklist"]["rows"])
+
+    assert "Битые ссылки" in cells
+    assert "Что осталось за обходом" in cells
+
+
+def test_summary_of_the_report_carries_the_caveats_of_the_same_run():
+    """Срок работ без объяснения, чему в балле верить нельзя, — половина вывода."""
+    out = rating.assess({"site_infra": table(row("a", "1", "норма — есть"))})
+
+    assert out["caveats"]
+    assert out["summary"]["rows"][3][1] == (
+        f"ограничений: {len(out['caveats'])} — они в разделе «Каких данных нет»")
+
+
+def test_summary_quotes_the_number_from_the_axis_table():
+    out = rating.assess(findings_report())
+    score_last = out["score"]["rows"][-1][2]
+
+    assert out["summary"]["rows"][0] == ["Балл готовности к трафику", score_last], (
+        "первая страница и таблица осей обязана давать одно и то же число"
+    )
+
+
+def test_summary_names_the_first_blocking_finding():
+    out = rating.summary_table(*_summary_args(findings_report()))
+    blocker = out["rows"][1][1]
+
+    assert blocker.startswith("Ссылки") and "всего таких находок 3" in blocker
+
+
+def test_summary_deadlines_count_the_same_rows_as_the_checklist():
+    out = rating.assess(findings_report())
+    counts = {rating.URGENT: 3, rating.SOON: 4, rating.LATER: 1}
+    checklist = "\n".join(item[0] for item in out["checklist"]["rows"])
+
+    assert out["summary"]["rows"][2][1] == (
+        "до запуска рекламы: 3, первые две недели: 4, по мере сил: 1")
+    for name, count in counts.items():
+        assert checklist.count(f"[ ] {name}") == count
+
+
+def test_summary_reports_its_own_limits_in_the_honest_block():
+    args = _summary_args({"site_infra": table(
+        row("a", "1", "норма — есть"), row("b", "2", "норма — есть"),
+        row("c", "3", "ошибка — сломано"))})
+    out = rating.summary_table(*args)
+
+    assert "ограничений:" in out["rows"][3][1]
+    assert "Каких данных нет" in out["rows"][3][1]
+
+
+def test_a_clean_summary_is_allowed_to_say_ready():
+    args = _summary_args({key: table(*[row(f"x{i}", "1", "норма — есть") for i in range(4)])
+                          for key in ("site_infra", "site_checks", "site_speed")})
+    out = rating.summary_table(*args)
+
+    assert out["rows"][0][1] == "100/100 — готов вести трафик"
+    assert out["rows"][1][1] == "грубых находок код не нашёл"
+    assert out["rows"][3][1] == "ни одна ось не отсеяна, очередь не урезана"
+
+
+def test_silence_is_not_summarised_as_a_clean_site():
+    args = _summary_args({key: table(*[row(f"x{i}", "нет", "не проверено — молчит")
+                                       for i in range(4)])
+                          for key in ("site_infra", "site_checks", "site_speed")})
+    out = rating.summary_table(*args)
+
+    assert out["rows"][1][1] == "выводов нет ни по одной проверке"
+    assert out["rows"][0][1] == "не проверено: балл не посчитан"
+
+
+def test_an_empty_summary_admits_there_was_nothing_to_count():
+    out = rating.assess({})["summary"]
+
+    assert out["rows"][0][1] == "не проверено: балл не посчитан"
+    assert out["rows"][1][1] == "не проверено: таблиц проверок в отчёте нет"
+    assert out["rows"][2][1] == "не проверено: записывать нечего"
+
+
+def _summary_args(result):
+    queue = queue_of(result)
+    axes = queue[:len(rating.AXES)]
+    summary = rating.summarize(axes)
+    caveats = rating.score_caveats(axes, summary)
+    beyond = rating.findings_count(queue) - len(rating.priority_rows(queue))
+    if beyond > 0:
+        caveats.append(f"Очередь работ урезана до {rating.MAX_PRIORITY_ROWS} строк")
+    return summary, caveats, queue
+
+
 # --- честные пробелы ---------------------------------------------------------
 
 
@@ -488,12 +696,15 @@ def test_assess_tables_share_the_report_shape():
         row("a", "1", "норма — есть"), row("b", "2", "ошибка — сломано"),
         row("c", "3", "норма — есть"), row("d", "4", "проверить — странно")])})
 
-    for name in ("score", "priorities"):
+    for name, width in (("score", 3), ("priorities", 3), ("checklist", 3), ("summary", 2)):
         made_up = out[name]
-        assert len(made_up["columns"]) == 3, "PDF рисует равные колонки: строк должно быть три"
+        assert len(made_up["columns"]) == width, "PDF рисует равные колонки"
         for item in made_up["rows"]:
-            assert len(item) == 3
+            assert len(item) == width
             assert all(isinstance(cell, str) and cell for cell in item)
+    # Первая страница обязана оставаться четырёхстрочной и называть автора чисел.
+    assert out["summary"]["columns"] == ["Что решает отчёт", "Посчитано кодом"]
+    assert len(out["summary"]["rows"]) == 4
 
 
 def test_the_number_and_the_words_cannot_disagree():
@@ -586,16 +797,17 @@ def test_the_model_cannot_write_its_own_score(analyzer):
               "rows": [["Сайт", "по моим словам", "100/100 — готов вести трафик"]]}
     facts = {"phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [],
              "signals": marks.scan_page(CLEAN_PAGE)}
+    answer = {"brief_analysis": "разбор", "site_score": forged, "action_priorities": forged,
+              "executive_summary": forged, "implementation_checklist": forged}
 
-    with_sources = analyzer._normalize_final_analysis(
-        {"brief_analysis": "разбор", "site_score": forged, "action_priorities": forged},
-        sources, facts)
-    without_sources = analyzer._normalize_final_analysis(
-        {"brief_analysis": "разбор", "site_score": forged, "action_priorities": forged}, None, None)
+    with_sources = analyzer._normalize_final_analysis(answer, sources, facts)
+    without_sources = analyzer._normalize_final_analysis(answer, None, None)
 
     assert "готов вести трафик" not in str(with_sources["site_score"])
-    assert "site_score" not in without_sources
-    assert "action_priorities" not in without_sources
+    assert "готов вести трафик" not in str(with_sources["executive_summary"])
+    for key in ("site_score", "action_priorities", "executive_summary",
+                "implementation_checklist"):
+        assert key not in without_sources, f"{key}: выдумка модели уцелела в отчёте"
 
 
 def test_the_score_of_a_clean_report_is_not_padded_with_caveats(analyzer):
@@ -627,6 +839,46 @@ def test_a_thin_crawl_sends_the_axis_into_the_honest_block(analyzer):
     assert "Индексация и живые ссылки» не посчитана" in gaps
     assert "Скорость и мобильность» не посчитана" in gaps
     assert "строк этой проверки в отчёте нет" in gaps
+
+
+def test_summary_and_checklist_open_the_report(analyzer):
+    """Первая страница обязана быть первой — и в PDF, и в интерфейсе."""
+    sources = [{"id": 1, "url": ORIGIN, "path": "/", "title": "T", "chars": 900}]
+    facts = {
+        "phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [],
+        "crawl": CRAWL,
+        "signals": marks.scan_page(DIRTY_PAGE),
+        "infra": infra.probe_site(ORIGIN, robots_fetch, []),
+        "speed": speed_block(),
+    }
+
+    normalized = analyzer._normalize_final_analysis({"brief_analysis": "разбор"}, sources, facts)
+    keys = list(normalized)
+    order = list(analyzer_module.REPORT_SECTION_ORDER)
+
+    assert keys[0] == "executive_summary"
+    assert order[0] == "executive_summary"
+    assert keys.index("action_priorities") + 1 == keys.index("implementation_checklist")
+    assert len(normalized["executive_summary"]["rows"]) == 4
+    assert normalized["executive_summary"]["rows"][0][1] == normalized["site_score"]["rows"][-1][2]
+
+
+def test_the_checklist_in_the_report_is_longer_than_the_capped_queue(analyzer):
+    sources = [{"id": 1, "url": ORIGIN, "path": "/", "title": "T", "chars": 900}]
+    facts = {
+        "phones": [], "emails": [], "legal_entities": [], "requisites": [], "prices": [],
+        "crawl": CRAWL,
+        "signals": marks.scan_page(DIRTY_PAGE),
+        "infra": infra.probe_site(ORIGIN, robots_fetch, []),
+        "speed": speed_block(),
+    }
+
+    normalized = analyzer._normalize_final_analysis({"brief_analysis": "разбор"}, sources, facts)
+    checklist = normalized["implementation_checklist"]
+
+    assert len(checklist["columns"]) == 3
+    assert len(checklist["rows"]) > len(normalized["action_priorities"]["rows"])
+    assert all(item[0].startswith("[ ] ") for item in checklist["rows"])
 
 
 def test_a_silent_probe_leaves_the_queue_without_a_promise():

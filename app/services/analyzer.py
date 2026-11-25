@@ -144,6 +144,7 @@ MAX_PLAUSIBLE_PRICE = 100_000_000
 # Порядок разделов отчёта: сначала то, что клиент узнает про свой сайт,
 # потом рекламные выводы, затем цифры и честно — чего не хватает.
 REPORT_SECTION_ORDER = (
+    "executive_summary",
     "brief_analysis",
     "key_facts",
     "comparison_table",
@@ -154,6 +155,7 @@ REPORT_SECTION_ORDER = (
     "site_crawl",
     "site_speed",
     "action_priorities",
+    "implementation_checklist",
     "ad_instructions",
     "keyword_seeds",
     "negative_keywords",
@@ -1649,8 +1651,9 @@ class SiteAnalyzer:
         score_caveats: List[str] = []
         # Балл считает код, и только он: ключ с тем же именем из ответа модели
         # читался бы как «посчитано кодом», поэтому его выкидываем заранее.
-        result.pop("site_score", None)
-        result.pop("action_priorities", None)
+        for key in ("site_score", "action_priorities", "executive_summary",
+                    "implementation_checklist"):
+            result.pop(key, None)
         # Потолочный разбор: читатель обязан видеть, сколько реально прочитано
         # и чего на страницах не было. Это считает код, а не модель.
         if sources:
@@ -1685,6 +1688,8 @@ class SiteAnalyzer:
             rating = site_score.assess(result)
             result["site_score"] = rating["score"]
             result["action_priorities"] = rating["priorities"]
+            result["implementation_checklist"] = rating["checklist"]
+            result["executive_summary"] = rating["summary"]
             score_caveats = rating["caveats"]
 
         for key in ("site_gaps", "risks_and_checks", "data_gaps"):

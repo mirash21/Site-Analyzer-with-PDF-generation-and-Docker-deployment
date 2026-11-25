@@ -30,6 +30,10 @@ HTML на месте карты назван картой, HEAD-отклик с�
 незакрытой ошибке — даже в той оси, которая в балл не попала. Очередь работ
 сортируется по весу оси, молчание проверок не притворяется чистым счётом, а ноль
 отличается от «не посчитано».
+Дальше — первая страница: краткий вывод обязан называть те же числа, что и
+таблицы ниже, не печататься дважды, не оставлять пустую главу и не обещать
+сроки там, где проверки промолчали; чек-лист работ ведётся тем же списком
+находок, что и очередь, но без потолка строк и с глаголом по каждому выводу.
 """
 
 import os
@@ -2121,14 +2125,14 @@ MUTATIONS = [
     (
         "score: потолок очереди снят",
         "app/services/site_score.py",
-        "    return [item[1:] for item in found[:limit]]",
-        "    return [item[1:] for item in found]",
+        "        for _, axis, row, _verdict, severity in _findings(axes)[:limit]",
+        "        for _, axis, row, _verdict, severity in _findings(axes)",
     ),
     (
         "score: строка очереди потеряла название оси",
         "app/services/site_score.py",
-        '                f"{str(row[0] or \'\').strip()} · {axis[\'name\']}",',
-        '                str(row[0] or "").strip(),',
+        '            f"{str(row[0] or \'\').strip()} · {axis[\'name\']}",',
+        '            str(row[0] or "").strip(),',
     ),
     (
         "score: срок платит не вес, а тяжесть",
@@ -2217,8 +2221,12 @@ MUTATIONS = [
     (
         "analyzer: балл из ответа модели прошёл в отчёт",
         "app/services/analyzer.py",
-        '        result.pop("site_score", None)\n        result.pop("action_priorities", None)',
-        "        pass",
+        '        for key in ("site_score", "action_priorities", "executive_summary",\n'
+        '                    "implementation_checklist"):\n'
+        "            result.pop(key, None)",
+        '        for key in ("site_score", "action_priorities", "executive_summary",\n'
+        '                    "implementation_checklist"):\n'
+        "            pass",
     ),
     (
         "analyzer: раздел балла выпал из порядка отчёта",
@@ -2249,6 +2257,244 @@ MUTATIONS = [
         "app/services/analyzer.py",
         "        if score_caveats:",
         "        if False:",
+    ),
+    (
+        "score: вывод «норма» записан находкой",
+        "app/services/site_score.py",
+        "            severity = URGENCY_SEVERITY.get(verdict)",
+        "            severity = URGENCY_SEVERITY.get(verdict, 0.5)",
+    ),
+    (
+        "score: очередь выстроена от лёгкого к тяжёлому",
+        "app/services/site_score.py",
+        "    found.sort(key=lambda item: -item[0])",
+        "    found.sort(key=lambda item: item[0])",
+    ),
+    (
+        "score: очередь сортируется по имени оси",
+        "app/services/site_score.py",
+        "    found.sort(key=lambda item: -item[0])",
+        '    found.sort(key=lambda item: (item[1]["name"], -item[0]))',
+    ),
+    (
+        "score: чек-лист урезан потолком очереди",
+        "app/services/site_score.py",
+        "        for _, axis, row, verdict, severity in _findings(queue)",
+        "        for _, axis, row, verdict, severity in _findings(queue)[:MAX_PRIORITY_ROWS]",
+    ),
+    (
+        "score: работа в чек-листе осталась без глагола",
+        "app/services/site_score.py",
+        '            f"{ACTION_VERB[verdict]}: {str(row[0] or \'\').strip()}",',
+        "            str(row[0] or \"\").strip(),",
+    ),
+    (
+        "score: ошибка и недостающее требуют одного и того же",
+        "app/services/site_score.py",
+        'ACTION_VERB = {BAD: "Исправить", MISSING: "Добавить", CHECK: "Проверить"}',
+        'ACTION_VERB = {BAD: "Проверить", MISSING: "Добавить", CHECK: "Проверить"}',
+    ),
+    (
+        "score: чек-лист нельзя отметить",
+        "app/services/site_score.py",
+        'CHECKBOX = "[ ]"',
+        'CHECKBOX = "готово"',
+    ),
+    (
+        "score: один срок выпал из сводки работ",
+        "app/services/site_score.py",
+        "DEADLINES = (URGENT, SOON, LATER)",
+        "DEADLINES = (URGENT, SOON)",
+    ),
+    (
+        "score: чек-лист не говорит, где искать работу",
+        "app/services/site_score.py",
+        '    text = f"{axis[\'name\']} · вес оси {int(round(axis[\'weight\'] * 100))}%"',
+        '    text = f"{axis[\'name\']}"',
+    ),
+    (
+        "score: ячейка чек-листа раздвигает страницу",
+        "app/services/site_score.py",
+        '    return f"{text} · {seen}"[:MAX_CELL] if seen else text',
+        '    return f"{text} · {seen}" if seen else text',
+    ),
+    (
+        "score: работы сваливаются в ближайший срок",
+        "app/services/site_score.py",
+        '        out[due_for(axis["weight"], severity)] += 1',
+        "        out[URGENT] += 1",
+    ),
+    (
+        "score: чек-лист молчит про отсутствие таблиц",
+        "app/services/site_score.py",
+        '    if not any(axis["counts"]["total"] for axis in queue):',
+        "    if False:",
+    ),
+    (
+        "score: молчание проверок названо чистой работой",
+        "app/services/site_score.py",
+        '    measured = sum(axis["counts"]["measured"] for axis in queue)',
+        '    measured = sum(axis["counts"]["total"] for axis in queue)',
+    ),
+    (
+        "score: у чек-листа пропала колонка места",
+        "app/services/site_score.py",
+        '    columns = ["Отметка и срок", "Что сделать", "Где искать и в каком объёме"]',
+        '    columns = ["Отметка и срок", "Что сделать"]',
+    ),
+    (
+        "score: первая страница не называет автора чисел",
+        "app/services/site_score.py",
+        '    columns = ["Что решает отчёт", "Посчитано кодом"]',
+        '    columns = ["Что решает отчёт", "Написано моделью"]',
+    ),
+    (
+        "score: блокирующая находка взята не из «до запуска»",
+        "app/services/site_score.py",
+        '    urgent = [item for item in findings if due_for(item[1]["weight"], item[4]) '
+        '== URGENT]',
+        '    urgent = [item for item in findings if due_for(item[1]["weight"], item[4]) '
+        '== SOON]',
+    ),
+    (
+        "score: сводка считает находки всей очереди",
+        "app/services/site_score.py",
+        '         (f"{str(urgent[0][2][0] or \'\').strip()} — всего таких находок '
+        '{len(urgent)}" if urgent',
+        '         (f"{str(urgent[0][2][0] or \'\').strip()} — всего таких находок '
+        '{len(findings)}" if urgent',
+    ),
+    (
+        "score: не посчитанный балл показан числом",
+        "app/services/site_score.py",
+        '          if summary["axes"] else f"{UNKNOWN}: балл не посчитан")],',
+        "          if True else f\"{UNKNOWN}: балл не посчитан\")],",
+    ),
+    (
+        "score: сводка обещает сроки без единой проверки",
+        "app/services/site_score.py",
+        '         (", ".join(f"{name}: {due[name]}" for name in DEADLINES)\n'
+        '          if any(item["counts"]["total"] for item in queue)',
+        '         (", ".join(f"{name}: {due[name]}" for name in DEADLINES)\n'
+        "          if True",
+    ),
+    (
+        "score: сводка снимает ограничения, когда они есть",
+        "app/services/site_score.py",
+        '         (f"ограничений: {len(caveats)} — они в разделе «Каких данных нет»" if caveats',
+        '         (f"ограничений: {len(caveats)} — они в разделе «Каких данных нет»" '
+        'if not caveats',
+    ),
+    (
+        "score: сводка не говорит, где читать ограничения",
+        "app/services/site_score.py",
+        '         (f"ограничений: {len(caveats)} — они в разделе «Каких данных нет»" if caveats',
+        '         (f"ограничений: {len(caveats)} — подробности в устном разборе" if caveats',
+    ),
+    (
+        "score: работы обхода выпадают из срока сводки",
+        "app/services/site_score.py",
+        "    due = deadline_counts(queue)",
+        '    due = deadline_counts([item for item in queue if item["counted"]])',
+    ),
+    (
+        "score: чек-лист собран только из балльных осей",
+        "app/services/site_score.py",
+        '        "checklist": checklist_table(queue),',
+        '        "checklist": checklist_table(axes),',
+    ),
+    (
+        "score: сводка посчитана по урезанному составу работ",
+        "app/services/site_score.py",
+        '        "summary": summary_table(summary, caveats, queue),',
+        '        "summary": summary_table(summary, caveats, axes[:len(AXES)]),',
+    ),
+    (
+        "score: сводка не получила пробелы этого запуска",
+        "app/services/site_score.py",
+        '        "summary": summary_table(summary, caveats, queue),',
+        '        "summary": summary_table(summary, [], queue),',
+    ),
+    (
+        "pdf: краткий вывод не попал на первую страницу",
+        "app/services/pdf_report.py",
+        "    if summary:",
+        "    if False:",
+    ),
+    (
+        "pdf: первая страница подписана чужим разделом",
+        "app/services/pdf_report.py",
+        '        story.append(Paragraph(_label("executive_summary"), styles["section"]))',
+        '        story.append(Paragraph(_label("site_score"), styles["section"]))',
+    ),
+    (
+        "pdf: краткий вывод напечатан второй раз",
+        "app/services/pdf_report.py",
+        '            if key == "executive_summary":\n                continue',
+        "            if False:\n                continue",
+    ),
+    (
+        "pdf: глава «Итоговый анализ» осталась пустой",
+        "app/services/pdf_report.py",
+        '    rest = ([key for key in final_analysis if key != "executive_summary"]\n'
+        "            if isinstance(final_analysis, dict) else [])",
+        '    rest = ([key for key in final_analysis]\n'
+        "            if isinstance(final_analysis, dict) else [])",
+    ),
+    (
+        "pdf: раздел краткого вывода вышел сырым ключом",
+        "app/services/pdf_report.py",
+        '        "executive_summary": "Кратко: что показывает аудит",',
+        "",
+    ),
+    (
+        "pdf: раздел чек-листа вышел сырым ключом",
+        "app/services/pdf_report.py",
+        '        "implementation_checklist": "Чек-лист работ для исполнителя (посчитан кодом)",',
+        "",
+    ),
+    (
+        "ui: интерфейс не знает названия краткого вывода",
+        "frontend/src/utils/labels.js",
+        "  executive_summary: 'Кратко: что показывает аудит',",
+        "",
+    ),
+    (
+        "ui: интерфейс не знает названия чек-листа",
+        "frontend/src/utils/labels.js",
+        "  implementation_checklist: 'Чек-лист работ для исполнителя',",
+        "",
+    ),
+    (
+        "analyzer: краткий вывод выпал из порядка отчёта",
+        "app/services/analyzer.py",
+        '    "executive_summary",\n    "brief_analysis",',
+        '    "brief_analysis",',
+    ),
+    (
+        "analyzer: чек-лист выпал из порядка отчёта",
+        "app/services/analyzer.py",
+        '    "action_priorities",\n    "implementation_checklist",',
+        '    "action_priorities",',
+    ),
+    (
+        "analyzer: краткий вывод не попал в отчёт",
+        "app/services/analyzer.py",
+        '            result["executive_summary"] = rating["summary"]',
+        "            pass",
+    ),
+    (
+        "analyzer: чек-лист не попал в отчёт",
+        "app/services/analyzer.py",
+        '            result["implementation_checklist"] = rating["checklist"]',
+        "            pass",
+    ),
+    (
+        "analyzer: чек-лист модели прошёл в отчёт",
+        "app/services/analyzer.py",
+        '        for key in ("site_score", "action_priorities", "executive_summary",\n'
+        '                    "implementation_checklist"):',
+        '        for key in ("site_score", "action_priorities", "executive_summary"):',
     ),
 ]
 

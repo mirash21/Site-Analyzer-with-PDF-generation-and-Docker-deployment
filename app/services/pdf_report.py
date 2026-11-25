@@ -352,12 +352,14 @@ def _label(key: Any) -> str:
         "data_coverage": "Что прочитано и чего не хватает",
         "raw_site_data": "Данные со страниц дословно",
         "site_gaps": "Что мешает конверсии на сайте",
+        "executive_summary": "Кратко: что показывает аудит",
         "site_score": "Оценка сайта по осям (посчитано кодом)",
         "site_checks": "Проверки по разметке сайта (посчитано кодом)",
         "site_infra": "Инфраструктура сайта: robots, sitemap, ссылки (посчитано кодом)",
         "site_crawl": "Глубина обхода сайта (посчитано кодом)",
         "site_speed": "Скорость и мобильность сайта (посчитано кодом)",
         "action_priorities": "Что чинить и в каком порядке (посчитано кодом)",
+        "implementation_checklist": "Чек-лист работ для исполнителя (посчитан кодом)",
         "risks_and_checks": "Риски и что проверить перед запуском",
         "data_gaps": "Каких данных нет",
         "keyword_seeds": "Базовые запросы",
@@ -556,17 +558,29 @@ def build_analysis_pdf(analysis: dict) -> bytes:
     story.append(Spacer(1, 8))
 
     final_analysis = analysis.get("final_analysis") or {}
-    story.append(Paragraph("Итоговый анализ", styles["section"]))
-    if isinstance(final_analysis, dict) and final_analysis:
+    # Краткое решение живёт на первой странице: клиент обязан увидеть вывод и
+    # первый срок работ, не листая отчёт. Числа те же, что в таблицах ниже.
+    summary = (final_analysis.get("executive_summary")
+               if isinstance(final_analysis, dict) else None)
+    if summary:
+        story.append(Paragraph(_label("executive_summary"), styles["section"]))
+        story.extend(value_flowables(summary, styles))
+        story.append(Spacer(1, 6))
+    rest = ([key for key in final_analysis if key != "executive_summary"]
+            if isinstance(final_analysis, dict) else [])
+    if isinstance(final_analysis, dict) and rest:
+        story.append(Paragraph("Итоговый анализ", styles["section"]))
         for key, value in final_analysis.items():
+            if key == "executive_summary":
+                continue
             story.append(Paragraph(_label(key), styles["h2"]))
             if _is_keyword_list(key, value):
                 story.append(keyword_list_flowable(value, styles))
                 continue
             story.extend(value_flowables(value, styles))
-    elif final_analysis:
+    elif final_analysis and not isinstance(final_analysis, dict):
         story.extend(value_flowables(final_analysis, styles))
-    else:
+    elif not final_analysis:
         story.append(Paragraph("итогового анализа нет", styles["note"]))
 
     steps = analysis.get("steps") or []

@@ -26,6 +26,26 @@ def styles():
     return pdf_report._styles()
 
 
+def pdf_pages(payload: bytes):
+    """Текст каждой страницы: порядок в PDF читается по тексту, а не по пикселям."""
+    import io
+
+    from pypdf import PdfReader
+
+    return [page.extract_text() or "" for page in PdfReader(io.BytesIO(payload)).pages]
+
+
+EXEC_SUMMARY = {
+    "columns": ["Что решает отчёт", "Посчитано кодом"],
+    "rows": [
+        ["Балл готовности к трафику", "54/100 — до рекламы нужно починить"],
+        ["Что мешает запустить рекламу", "Ссылки — всего таких находок 3"],
+        ["Порядок работ", "до запуска рекламы: 3, первые две недели: 4, по мере сил: 1"],
+        ["Чему в этом балле верить нельзя", "ни одна ось не отсеяна, очередь не урезана"],
+    ],
+}
+
+
 def sample_analysis():
     return {
         "url": "https://tateng.ru/",
@@ -241,6 +261,57 @@ def test_any_markdown_crumbs_survive_the_pdf(value):
     analysis["final_analysis"]["brief_analysis"] = value
 
     assert build_analysis_pdf(analysis).startswith(b"%PDF-")
+
+
+def test_executive_summary_owns_the_first_pdf_page():
+    """Краткий вывод обязан читаться до того, как отчёт начнёт доказывать."""
+    analysis = sample_analysis()
+    analysis["final_analysis"] = {
+        "executive_summary": EXEC_SUMMARY,
+        "brief_analysis": "Сайт поставщика инструмента.",
+    }
+    analysis["intermediate_results"] = [
+        {"step_number": index, "step": f"шаг {index}",
+         "result": "Длинный абзац доказательства. " * 80}
+        for index in range(1, 5)
+    ]
+
+    page_one = pdf_pages(build_analysis_pdf(analysis))[0]
+
+    assert "Кратко: что показывает аудит" in page_one
+    assert "Балл готовности к трафику" in page_one and "54/100" in page_one
+    assert "Промежуточные результаты" not in page_one
+
+
+def test_a_lone_summary_leaves_no_empty_chapter():
+    """Раздел «Итоговый анализ» не имеет права остаться заголовком без текста."""
+    payload = build_analysis_pdf({"url": "https://tateng.ru",
+                                  "final_analysis": {"executive_summary": EXEC_SUMMARY}})
+    page_one = pdf_pages(payload)[0]
+
+    assert "Балл готовности к трафику" in page_one
+    assert "Итоговый анализ" not in page_one
+
+
+def test_a_report_without_summary_still_opens_with_the_analysis():
+    analysis = sample_analysis()
+    analysis["final_analysis"].pop("executive_summary", None)
+    page_one = pdf_pages(build_analysis_pdf(analysis))[0]
+
+    assert "Итоговый анализ" in page_one
+    assert "Кратко: что показывает аудит" not in page_one
+
+
+def test_the_summary_is_not_printed_twice():
+    """Краткий вывод — один раз: дважды прочитанное число выглядит разными."""
+    payload = build_analysis_pdf({
+        "url": "https://tateng.ru",
+        "final_analysis": {"executive_summary": EXEC_SUMMARY, "brief_analysis": "Разбор."},
+    })
+
+    counted = "\n".join(pdf_pages(payload)).count("Балл готовности к трафику")
+
+    assert counted == 1, " первая страница и общий раздел спорят с читателем"
 
 
 def test_every_section_is_named_in_pdf_and_ui():
