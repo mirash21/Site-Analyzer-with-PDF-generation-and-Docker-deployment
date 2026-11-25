@@ -212,7 +212,8 @@ def test_evidence_collection_counts_every_page_it_read(analyzer, monkeypatch):
     inner = BAD_PAGE.replace(
         "</body>",
         "".join(f"<p>Позиция {index}: характеристики, описание, применимость.</p>"
-                for index in range(30)) + "</body>",
+                for index in range(30))
+        + '<a href="/delivery">Доставка</a></body>',
     )
     pages = {
         "https://tateng.ru/": GOOD_PAGE,
@@ -220,9 +221,20 @@ def test_evidence_collection_counts_every_page_it_read(analyzer, monkeypatch):
         "https://tateng.ru/about": inner,
     }
     monkeypatch.setattr(analyzer, "fetch_site_html", lambda url: pages.get(url, ""))
+    probed = []
+
+    def fake_probe(url, method="GET"):
+        probed.append(url)
+        return {"status": 0, "text": "", "chain": []}
+
+    monkeypatch.setattr(analyzer, "fetch_probe", fake_probe)
 
     _, sources, facts = analyzer.collect_site_evidence("https://tateng.ru/")
 
     assert len(sources) >= 2, "тест без внутренних страниц ничего не проверяет"
     assert facts["signals"]["pages"] == len(sources), "проверено ровно столько, сколько прочитано"
     assert facts["signals"]["analytics"] == {"Яндекс Метрика": 1}, "со страниц без счётчика их не добавляют"
+    assert "https://tateng.ru/delivery" in probed, (
+        "ссылки внутренних страниц обязаны попасть в пробу, а не только ссылки главной"
+    )
+    assert "https://tateng.ru/catalog" not in probed, "прочитанную страницу не перепроверяют"

@@ -9,6 +9,9 @@
 лимита площадки, средний чек из догадки вместо цен сайта.
 Дальше — проверки по разметке: счётчик, найденный по слову о нём, охват
 «стоит на половине страниц», вывод там, где читать было нечего.
+Дальше — инфраструктура: «404» и «сервер молчит» подменены одним выводом,
+HTML на месте карты назван картой, HEAD-отклик стал битой ссылкой, бюджет
+пробы выключен, редирект ведёт внутрь сети.
 """
 
 import os
@@ -42,8 +45,12 @@ MUTATIONS = [
     (
         "analyzer: ссылки на чужие хосты принимаются",
         "app/services/analyzer.py",
-        '        if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != base_netloc:',
-        '        if parsed.scheme not in ("http", "https"):',
+        '            absolute = urljoin(base_url, href)\n'
+        "            parsed = urlparse(absolute)\n"
+        '            if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != base_netloc:',
+        '            absolute = urljoin(base_url, href)\n'
+        "            parsed = urlparse(absolute)\n"
+        '            if parsed.scheme not in ("http", "https"):',
     ),
     (
         "analyzer: внутренние страницы без бюджета (лимит выключен)",
@@ -133,7 +140,9 @@ MUTATIONS = [
     (
         "analyzer: честный блок отдаёт на откуп модели",
         "app/services/analyzer.py",
-        '        seeded = cls._seed_data_gaps(facts) + site_signals.signal_gaps(facts.get("signals"))',
+        "        seeded = (\n            cls._seed_data_gaps(facts)\n"
+        '            + site_signals.signal_gaps(facts.get("signals"))\n'
+        '            + site_infra.infra_gaps(facts.get("infra"))\n        )',
         "        seeded = []",
     ),
     (
@@ -303,28 +312,34 @@ MUTATIONS = [
     (
         "analyzer: проверки разметки не дошли до итогового промпта",
         "app/services/analyzer.py",
-        r'            + (f"{signals_block}\n\n" if signals_block else "")',
+        r'            + (f"{checks_block}\n\n" if checks_block else "")',
         '            + ""',
     ),
     (
-        "analyzer: план кампании не видит проверок по разметке",
+        "analyzer: план кампании не видит проверок, посчитанных кодом",
         "app/services/analyzer.py",
         '        literal = self.render_business_facts(facts) if facts else ""\n'
-        "        signals_block = self._signals_block(facts)",
-        '        literal = self.render_business_facts(facts) if facts else ""',
+        "        checks_block = self._checks_block(facts)",
+        '        literal = self.render_business_facts(facts) if facts else ""\n'
+        '        checks_block = ""',
     ),
     (
-        "analyzer: экономика не видит проверок по разметке",
+        "analyzer: экономика не видит проверок, посчитанных кодом",
         "app/services/analyzer.py",
         "        literal = self.render_business_facts(facts)\n"
-        "        signals_block = self._signals_block(facts)",
-        "        literal = self.render_business_facts(facts)",
+        "        checks_block = self._checks_block(facts)",
+        "        literal = self.render_business_facts(facts)\n"
+        '        checks_block = ""',
     ),
     (
         "analyzer: пробелы из проверок теряются в data_gaps",
         "app/services/analyzer.py",
-        "        seeded = cls._seed_data_gaps(facts) + site_signals.signal_gaps(facts.get(\"signals\"))",
-        "        seeded = cls._seed_data_gaps(facts)",
+        "        seeded = (\n            cls._seed_data_gaps(facts)\n"
+        '            + site_signals.signal_gaps(facts.get("signals"))\n'
+        '            + site_infra.infra_gaps(facts.get("infra"))\n        )',
+        "        seeded = (\n            cls._seed_data_gaps(facts)\n"
+        '            + site_signals.signal_gaps(facts.get("signals"))\n'
+        "            + []\n        )",
     ),
     (
         "analyzer: раздел проверок не попадает в отчёт",
@@ -352,6 +367,216 @@ MUTATIONS = [
         "pdf: раздел проверок вышел в PDF сырым ключом",
         "app/services/pdf_report.py",
         '        "site_checks": "Проверки по разметке сайта (посчитано кодом)",',
+        "",
+    ),
+    # --- Инфраструктура: вывод рождается из кода ответа, а не из догадки -----
+    (
+        "infra: молчание сервера сравнялось с «файла нет»",
+        "app/services/site_infra.py",
+        '    if not status:\n        return "unreachable"',
+        '    if not status:\n        return "absent"',
+    ),
+    (
+        "infra: незакрытый редирект засчитан прочитанным файлом",
+        "app/services/site_infra.py",
+        '        # Незакрытый редирект: файл мы не прочитали, но сказать «404» было бы враньём.\n        return "error"',
+        '        # Незакрытый редирект: файл мы не прочитали, но сказать «404» было бы враньём.\n        return "ok"',
+    ),
+    (
+        "infra: html-страница на месте sitemap объявлена картой",
+        "app/services/site_infra.py",
+        '        out["state"] = "foreign"',
+        '        out["state"] = "ok"',
+    ),
+    (
+        "infra: индекс карт назван картой страниц",
+        "app/services/site_infra.py",
+        '    elif out["nested"] == len(locs) and len(locs) > 1:',
+        "    elif False:",
+    ),
+    (
+        "infra: чужие хосты в карте не считаются",
+        "app/services/site_infra.py",
+        '    base_host = (urlparse(origin).netloc or "").lower()',
+        '    base_host = ""',
+    ),
+    (
+        "infra: отказ HEAD не перепроверяется GET",
+        "app/services/site_infra.py",
+        "        if status in (405, 501) or not status:",
+        "        if not status:",
+    ),
+    (
+        "infra: редирект ссылки потерян",
+        "app/services/site_infra.py",
+        "        elif chain:",
+        "        elif False:",
+    ),
+    (
+        "infra: бюджет времени пробы выключен",
+        "app/services/site_infra.py",
+        "        if clock() - started > budget:",
+        "        if False:",
+    ),
+    (
+        "infra: число проверяемых ссылок не ограничено",
+        "app/services/site_infra.py",
+        "    for url in links[:MAX_LINK_CHECKS]:",
+        "    for url in links:",
+    ),
+    (
+        "infra: говорящий ответ затёрт простым 404 на запасном пути",
+        "app/services/site_infra.py",
+        '        if chosen is None or (chosen["state"] == "absent" and sitemap["state"] != "absent"):',
+        "        if chosen is None:",
+    ),
+    (
+        "infra: типовые пути карты не проверяются",
+        "app/services/site_infra.py",
+        "    for path in SITEMAP_FALLBACKS:",
+        "    for path in ():",
+    ),
+    (
+        "infra: «карты нет» без перечисления проверенных путей",
+        "app/services/site_infra.py",
+        "        if probed:",
+        "        if False:",
+    ),
+    (
+        "infra: адрес найденной карты скрыт от модели",
+        "app/services/site_infra.py",
+        '    if state in ("ok", "index") and sitemap.get("url"):',
+        "    if False:",
+    ),
+    (
+        "infra: редиректы ссылок исчезли из таблицы",
+        "app/services/site_infra.py",
+        "        for item in redirected[:2]:",
+        "        for item in []:",
+    ),
+    (
+        "infra: «проверять нечего» и «сервер молчит» — один вывод",
+        "app/services/site_infra.py",
+        '            "внутренних ссылок не найдено" if not found else "проверить не удалось",',
+        '            "проверить не удалось" if not found else "внутренних ссылок не найдено",',
+    ),
+    (
+        "infra: редирект перестал быть поводом проверить",
+        "app/services/site_infra.py",
+        '        row("Внутренние ссылки", seen, BAD if broken else CHECK if redirected else OK,',
+        '        row("Внутренние ссылки", seen, BAD if broken else OK,',
+    ),
+    (
+        "infra: не завершившаяся проба притворилась проверкой",
+        "app/services/site_infra.py",
+        "    rows: List[List[str]] = []\n    if infra.get(\"failed\"):",
+        "    rows: List[List[str]] = []\n    if False:",
+    ),
+    (
+        "infra: сбой пробы пропал из честного блока",
+        "app/services/site_infra.py",
+        "    if infra.get(\"failed\"):\n        return [\n",
+        "    if False:\n        return [\n",
+    ),
+    (
+        "infra: отсутствие пробы породило выводы ни о чём",
+        "app/services/site_infra.py",
+        "def infra_gaps(infra: Dict) -> List[str]:\n    \"\"\"Чего нельзя утверждать по ответам сервера — честно списком.\"\"\"\n    if not infra:",
+        "def infra_gaps(infra: Dict) -> List[str]:\n    \"\"\"Чего нельзя утверждать по ответам сервера — честно списком.\"\"\"\n    if False:",
+    ),
+    (
+        "infra: претензия к карте сайта исчезла из честного блока",
+        "app/services/site_infra.py",
+        '    if (infra.get("sitemap") or {}).get("state") not in ("ok", "index"):',
+        "    if False:",
+    ),
+    # --- Инфраструктура в анализаторе и отчёте ---------------------------
+    (
+        "analyzer: ответы сервера не дошли до промптов",
+        "app/services/analyzer.py",
+        '        infra = facts.get("infra") or {}\n'
+        "        if infra and not infra.get(\"failed\"):\n"
+        "            blocks.append(site_infra.render_infra(infra))",
+        "        infra = {}",
+    ),
+    (
+        "analyzer: сбой инфраструктуры потерялся в data_gaps",
+        "app/services/analyzer.py",
+        '            + site_infra.infra_gaps(facts.get("infra"))',
+        "            + []",
+    ),
+    (
+        "analyzer: раздел инфраструктуры не попадает в отчёт",
+        "app/services/analyzer.py",
+        '            infra_checks = site_infra.build_infra_checks(infra) if infra else {"rows": []}\n'
+        '            if infra_checks["rows"]:',
+        '            infra_checks = site_infra.build_infra_checks(infra) if infra else {"rows": []}\n'
+        "            if False:",
+    ),
+    (
+        "analyzer: раздел инфраструктуры выпал из порядка чтения",
+        "app/services/analyzer.py",
+        '    "site_checks",\n    "site_infra",\n',
+        '    "site_checks",\n',
+    ),
+    (
+        "analyzer: относительная ссылка проверяется не там, где живёт",
+        "app/services/analyzer.py",
+        "                absolute = urldefrag(urljoin(home, href)).url",
+        "                absolute = urldefrag(urljoin(base_url, href)).url",
+    ),
+    (
+        "analyzer: чужие ссылки уходят в пробу",
+        "app/services/analyzer.py",
+        "                absolute = urldefrag(urljoin(home, href)).url\n"
+        "                parsed = urlparse(absolute)\n"
+        '                if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != base_netloc:',
+        "                absolute = urldefrag(urljoin(home, href)).url\n"
+        "                parsed = urlparse(absolute)\n"
+        '                if parsed.scheme not in ("http", "https"):',
+    ),
+    (
+        "analyzer: прочитанные страницы перепроверяются зондом",
+        "app/services/analyzer.py",
+        "        seen = {str(url).rstrip(\"/\") for url in skip if url}",
+        "        seen = set()",
+    ),
+    (
+        "analyzer: ссылки для пробы не собираются",
+        "app/services/analyzer.py",
+        "        links = self.internal_links(\n"
+        "            url, pages_html, [source[\"url\"] for source in sources], site_infra.MAX_LINK_CHECKS\n"
+        "        )",
+        "        links = []",
+    ),
+    (
+        "analyzer: редиректы разворачивает requests, а не зонд",
+        "app/services/analyzer.py",
+        "                    allow_redirects=False,",
+        "                    allow_redirects=True,",
+    ),
+    (
+        "analyzer: шаг редиректа не проверяется на внутренний адрес",
+        "app/services/analyzer.py",
+        "                    current = self._validate_url(target)",
+        "                    current = target",
+    ),
+    (
+        "analyzer: HEAD принёс тело страницы в проверку",
+        "app/services/analyzer.py",
+        '                    body = response.text if method.upper() == "GET" else ""',
+        "                    body = response.text",
+    ),
+    (
+        "analyzer: мёртвый адрес роняет весь аудит",
+        "app/services/analyzer.py",
+        '            return {"status": 0, "text": "", "chain": chain, "url": current or url}',
+        "            raise",
+    ),
+    (
+        "pdf: раздел инфраструктуры вышел в PDF сырым ключом",
+        "app/services/pdf_report.py",
+        '        "site_infra": "Инфраструктура сайта: robots, sitemap, ссылки (посчитано кодом)",',
         "",
     ),
 ]
@@ -387,10 +612,15 @@ def acquire_lock() -> None:
 
 def main():
     targets = {
-        "app/services/analyzer.py": ("tests/test_analyzer_input.py", "tests/test_site_signals.py"),
+        "app/services/analyzer.py": (
+            "tests/test_analyzer_input.py",
+            "tests/test_site_signals.py",
+            "tests/test_site_infra.py",
+        ),
         "app/routers/history.py": ("tests/test_history_pdf_endpoint.py",),
-        "app/services/pdf_report.py": ("tests/test_pdf_report.py",),
+        "app/services/pdf_report.py": ("tests/test_pdf_report.py", "tests/test_site_infra.py"),
         "app/services/site_signals.py": ("tests/test_site_signals.py",),
+        "app/services/site_infra.py": ("tests/test_site_infra.py",),
     }
     survived = []
 

@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse, urldefrag
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Tuple
-from app.services import site_signals
+from app.services import site_infra, site_signals
 from app.services.llm_client import LLMClient
 
 
@@ -49,6 +49,12 @@ MENU_SHARE = 0.06
 SITE_FETCH_TIMEOUT = 15
 MIN_EXTRA_PAGE_CHARS = 200
 FACTS_BLOCK_ROOM = 1200
+
+# Ответ сервера для инфраструктурных проверок ждут недолго: страница может
+# думать пятнадцать секунд, а весь аудит — минуту.
+SITE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+PROBE_TIMEOUT = 8
+MAX_REDIRECT_HOPS = 3
 
 # Список семантики короче, чем фантазия модели: 60 фраз «купить инструмент»
 # на одну страницу никто не проверяет, а платят за показ каждой.
@@ -141,6 +147,7 @@ REPORT_SECTION_ORDER = (
     "comparison_table",
     "site_gaps",
     "site_checks",
+    "site_infra",
     "ad_instructions",
     "keyword_seeds",
     "negative_keywords",
@@ -239,9 +246,7 @@ class SiteAnalyzer:
             # SSRF-защита: валидация URL перед запросом
             url = self._validate_url(url)
 
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
+            headers = {'User-Agent': SITE_USER_AGENT}
             response = requests.get(
                 url,
                 headers=headers,
@@ -269,6 +274,81 @@ class SiteAnalyzer:
             if location:
                 SiteAnalyzer._validate_url(location)
         return response
+
+    def fetch_probe(self, url: str, method: str = "GET") -> Dict:
+        """Один ответ сервера как есть: код, текст и цепочка редиректов.
+
+        Страницы качает fetch_site_html, где редиректы разворачивает requests.
+        Для robots, sitemap и проверки ссылок нужны именно коды: «404» и
+        «сервер молчит» — разные выводы для клиента, а след редиректов показывает,
+        куда на самом деле ведёт ссылка из меню.
+        """
+        chain: List[Dict] = []
+        status = 0
+        current = ""
+        try:
+            current = self._validate_url(url)
+            for _ in range(MAX_REDIRECT_HOPS + 1):
+                response = requests.request(
+                    method,
+                    current,
+                    headers={'User-Agent': SITE_USER_AGENT},
+                    timeout=PROBE_TIMEOUT,
+                    allow_redirects=False,
+                )
+                try:
+                    status = response.status_code
+                    location = (response.headers.get("Location") or "").strip()
+                    if not (300 <= status < 400 and location):
+                        body = response.text if method.upper() == "GET" else ""
+                        return {"status": status, "text": body, "chain": chain, "url": current}
+                    target = urljoin(current, location)
+                    chain.append({"from": current, "to": target, "status": status})
+                    current = self._validate_url(target)
+                finally:
+                    # Тело читают не все проверки, а соединение закрывать нужно
+                    # и при редиректе, и при ошибке.
+                    response.close()
+            return {"status": status, "text": "", "chain": chain, "url": current}
+        except Exception:
+            # Неудача пробы — это данные, а не исключение: отчёт обязан уметь
+            # сказать «ответ не получен», а не упасть из-за одного адреса.
+            return {"status": 0, "text": "", "chain": chain, "url": current or url}
+
+    def internal_links(self, base_url: str, pages: List[Tuple[str, str]], skip: List[str], limit: int) -> List[str]:
+        """Внутренние адреса прочитанных страниц — их проверяют запросами.
+
+        Прочитанное не перепроверяют: эти страницы уже отдали 200, а бюджет
+        пробы нужнее для ссылок, которые в обход не попали. Ссылку разрешают
+        относительно её собственной страницы: «product/1.html» с /catalog/ —
+        это /catalog/product/1.html, а не корневой адрес, и проверка несуществующего
+        корня выдала бы клиенту ложную битую ссылку.
+        """
+        base_netloc = (urlparse(base_url).netloc or "").lower()
+        seen = {str(url).rstrip("/") for url in skip if url}
+        found: List[str] = []
+        for page_url, html in pages:
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+            except Exception:  # noqa: BLE001 - одна битая страница не отменяет проверку
+                continue
+            home = page_url or base_url
+            for anchor in soup.find_all("a", href=True):
+                href = str(anchor.get("href") or "").strip()
+                if not href or href.startswith(("#", "?", "tel:", "mailto:", "javascript:", "data:")):
+                    continue
+                absolute = urldefrag(urljoin(home, href)).url
+                parsed = urlparse(absolute)
+                if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != base_netloc:
+                    continue
+                key = absolute.rstrip("/")
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(absolute)
+                if len(found) >= limit:
+                    return found
+        return found
 
     @staticmethod
     def _meta(soup: BeautifulSoup, name: str) -> str:
@@ -483,16 +563,23 @@ class SiteAnalyzer:
         target["prices"] = sorted(set(target.get("prices", [])) | set(addition.get("prices", [])))
         return target
 
-    @staticmethod
-    def _signals_block(facts: Dict | None) -> str:
-        """Проверки по разметке для промпта.
+    @classmethod
+    def _checks_block(cls, facts: Dict | None) -> str:
+        """Что посчитано кодом: разметка страниц и ответы сервера.
 
-        Модель не видит исходный HTML и не может сама узнать, стоит ли на сайте
-        счётчик или есть ли форма. Без переданного блока она пишет «проблемы
-        конверсии» общими словами там, где кодом посчитан конкретный дефект.
+        Модель не видит исходный HTML и не делает запросов к сайту. Без
+        переданных проверок она пишет «проблемы конверсии» общими словами там,
+        где кодом посчитан конкретный дефект.
         """
-        signals = (facts or {}).get("signals") or {}
-        return site_signals.render_signals(signals) if signals.get("pages") else ""
+        facts = facts or {}
+        blocks: List[str] = []
+        signals = facts.get("signals") or {}
+        if signals.get("pages"):
+            blocks.append(site_signals.render_signals(signals))
+        infra = facts.get("infra") or {}
+        if infra and not infra.get("failed"):
+            blocks.append(site_infra.render_infra(infra))
+        return "\n\n".join(blocks)
 
     @staticmethod
     def _money(value: int) -> str:
@@ -634,6 +721,7 @@ class SiteAnalyzer:
         # Проверки по разметке считаются по тем же страницам, что ушли в текст:
         # лишних запросов нет, и вывод опирается на прочитанное, а не на «в целом».
         facts["signals"] = site_signals.scan_page(html)
+        pages_html: List[Tuple[str, str]] = [(url, html)]
         sources: List[Dict] = [{
             "id": 1,
             "url": url,
@@ -660,6 +748,7 @@ class SiteAnalyzer:
             facts["signals"] = site_signals.merge_signals(
                 facts.get("signals"), site_signals.scan_page(extra_html)
             )
+            pages_html.append((link, extra_html))
 
             source_id = len(sources) + 1
             path = urlparse(link).path.rstrip("/") or "/"
@@ -676,6 +765,18 @@ class SiteAnalyzer:
             )
             if len(sources) >= MAX_EXTRA_PAGES + 1:
                 break
+
+        # Инфраструктура: robots, sitemap и живые ссылки. Это отдельные запросы,
+        # поэтому идут после сбора текста — страница для анализа нужнее проверки.
+        links = self.internal_links(
+            url, pages_html, [source["url"] for source in sources], site_infra.MAX_LINK_CHECKS
+        )
+        try:
+            facts["infra"] = site_infra.probe_site(
+                f"{start.scheme}://{start.netloc}", self.fetch_probe, links
+            )
+        except Exception:  # noqa: BLE001 - сбой проверки не стоит всего анализа
+            facts["infra"] = {"failed": True}
 
         # Главная получает первый номер: ссылки вида «Источник 1» должны
         # вести на неё, а не на первую попавшуюся внутреннюю страницу.
@@ -784,9 +885,9 @@ class SiteAnalyzer:
             for r in intermediate_results
         ])
 
-        # Проверки по разметке попадают и в промпт: без них модель описывает
-        # «проблемы конверсии» всеобщими фразами, хотя счётчика на сайте нет.
-        signals_block = self._signals_block(facts)
+        # Проверки, посчитанные кодом, попадают и в промпт: без них модель
+        # описывает «проблемы конверсии» всеобщими фразами, хотя счётчика на сайте нет.
+        checks_block = self._checks_block(facts)
 
         # Раньше промпт требовал «обязательно включи оригинальный текст сайта»:
         # модель пересказывала меню вместо разбора, а ответ упирался в лимит
@@ -796,7 +897,7 @@ class SiteAnalyzer:
             "Ты маркетолог. Объедини результаты промежуточного анализа в итоговый "
             "отчёт по сайту. Факты бери только из переданных данных.\n\n"
             f"Результаты анализа:\n{results_str}\n\n"
-            + (f"{signals_block}\n\n" if signals_block else "")
+            + (f"{checks_block}\n\n" if checks_block else "")
             + "Ответ строго в JSON со всеми полями:\n"
             "{\n"
             '  "brief_analysis": "краткий анализ сайта: кто продаёт, кому, чем цепляет; до 1500 знаков, markdown-список",\n'
@@ -809,8 +910,8 @@ class SiteAnalyzer:
             "Не вставляй в ответ оригинальный текст сайта целиком: максимум одна цитата длиной до 200 знаков. "
             "В rows и columns не переноси текст на новые строки. "
             "Номер источника указывай только тот, который есть в заголовках «Источник N»; своих адресов не выдумывай. "
-            "Если переданы проверки по разметке — опирайся на них: нет счётчика или формы, "
-            "пиши об этом прямо, а не общими словами про воронку. "
+            "Если переданы проверки, посчитанные кодом, — опирайся на них: нет счётчика, "
+            "формы или карты сайта, пиши об этом прямо, а не общими словами про воронку. "
             "Если данных нет — честно пиши об этом в data_gaps, не заменяя их догадками. "
             + RUSSIAN_ONLY_RULE
         )
@@ -837,8 +938,8 @@ class SiteAnalyzer:
             for r in intermediate_results
         )
         literal = self.render_business_facts(facts) if facts else ""
-        signals_block = self._signals_block(facts)
-        context = "\n\n".join(block for block in (literal, signals_block) if block)
+        checks_block = self._checks_block(facts)
+        context = "\n\n".join(block for block in (literal, checks_block) if block)
 
         system_prompt = (
             "Ты рекламный специалист. По результатам анализа сайта собери план кампании. "
@@ -859,8 +960,9 @@ class SiteAnalyzer:
             "Держись в лимитах знаков: Яндекс Директ — заголовок 56, текст 81; Google Ads — 30 и 90; "
             "VK Реклама — 40 и 90; Telegram Ads — один текст до 160 знаков, заголовка там нет. "
             "Пробелы, знаки препинания и цифры считаются; одно слово в заголовке — не длиннее 22 знаков. "
-            "Если переданы проверки по разметке — инструкция по запуску обязана их учитывать: "
-            "нет форм, значит заявка приходит по телефону, и это отдельная настройка кампании. "
+            "Если переданы проверки, посчитанные кодом, — инструкция по запуску обязана их учитывать: "
+            "нет форм, значит заявка приходит по телефону, и это отдельная настройка кампании; "
+            "битые ссылки в меню и отсутствие карты сайта — что починить до платного трафика. "
             + RUSSIAN_ONLY_RULE
         )
 
@@ -883,8 +985,8 @@ class SiteAnalyzer:
         """
         facts = facts or {}
         literal = self.render_business_facts(facts)
-        signals_block = self._signals_block(facts)
-        context = "\n\n".join(block for block in (literal, signals_block) if block)
+        checks_block = self._checks_block(facts)
+        context = "\n\n".join(block for block in (literal, checks_block) if block)
         results_str = "\n\n".join(
             f"Шаг {r['step_number']}: {r['step']}\nРезультат: {self._fit(r['result'], 900)}"
             for r in intermediate_results
@@ -906,7 +1008,8 @@ class SiteAnalyzer:
             "Если на страницах есть цены — avg_check оставь null: средний чек возьмут из них. "
             "Не знаешь значения — ставь null, угаданное число в медиаплане стоит денег. "
             "Если по проверкам разметки счётчиков или форм нет — конверсию брать неоткуда: "
-            "это допущение, и назови его в notes. "
+            "это допущение, и назови его в notes. Битые ссылки в меню тоже уводят часть трафика — "
+            "считай конверсию по тому, что реально работает. "
             + RUSSIAN_ONLY_RULE
         )
 
@@ -1084,7 +1187,11 @@ class SiteAnalyzer:
     @classmethod
     def _merge_data_gaps(cls, model_gaps: List[str], facts) -> List[str]:
         facts = facts or {}
-        seeded = cls._seed_data_gaps(facts) + site_signals.signal_gaps(facts.get("signals"))
+        seeded = (
+            cls._seed_data_gaps(facts)
+            + site_signals.signal_gaps(facts.get("signals"))
+            + site_infra.infra_gaps(facts.get("infra"))
+        )
         return cls._unique(seeded + list(model_gaps))
 
     @staticmethod
@@ -1379,6 +1486,12 @@ class SiteAnalyzer:
             checks = site_signals.build_site_checks(facts.get("signals"))
             if checks["rows"]:
                 result["site_checks"] = checks
+            # Инфраструктуру считает код: «robots.txt есть» и «sitemap на 404»
+            # модель не проверяла и проверить не может.
+            infra = facts.get("infra") or {}
+            infra_checks = site_infra.build_infra_checks(infra) if infra else {"rows": []}
+            if infra_checks["rows"]:
+                result["site_infra"] = infra_checks
 
         for key in ("site_gaps", "risks_and_checks", "data_gaps"):
             values = cls._normalize_string_list(result.get(key))

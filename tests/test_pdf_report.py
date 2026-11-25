@@ -241,3 +241,24 @@ def test_any_markdown_crumbs_survive_the_pdf(value):
     analysis["final_analysis"]["brief_analysis"] = value
 
     assert build_analysis_pdf(analysis).startswith(b"%PDF-")
+
+
+def test_every_section_is_named_in_pdf_and_ui():
+    """Порядок разделов задаёт бэкенд, названия — PDF и интерфейс.
+
+    Раздел без перевода выходит в отчёт сырым ключом: «Site infra» вместо
+    «Инфраструктура сайта». Проверка держит три списка в согласии.
+    """
+    from pathlib import Path
+
+    from app.services import analyzer as analyzer_module
+
+    script = (
+        Path(__file__).resolve().parents[1] / "frontend" / "src" / "utils" / "labels.js"
+    ).read_text(encoding="utf-8")
+
+    for key in analyzer_module.REPORT_SECTION_ORDER:
+        spaced = key.replace("_", " ").strip()
+        humanized = spaced[:1].upper() + spaced[1:]
+        assert pdf_report._label(key) != humanized, f"{key}: в PDF раздела нет"
+        assert f"{key}:" in script, f"{key}: фронтенд не знает названия раздела"
