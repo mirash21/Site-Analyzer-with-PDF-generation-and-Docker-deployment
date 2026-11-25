@@ -748,12 +748,16 @@ class SiteAnalyzer:
         # уровне вложенности — при неизменном бюджете знаков.
         policy = site_crawl.CrawlPolicy()
         policy.take(url, content, root=True)
-        queue: List[str] = policy.rank(self.candidate_links(
+        # Кандидаты с главной: в очередь идут страницы, файлы считаются отдельно.
+        # В known попадают и те и другие — иначе одна и та же ссылка на PDF
+        # встречается заново на каждой прочитанной странице.
+        candidates = self.candidate_links(
             url, html,
             limit=site_crawl.MAX_CANDIDATE_LINKS,
-            per_section=site_crawl.MAX_PAGES_PER_SECTION,
-        ))
-        known = {site_crawl.norm(link) for link in [url, *queue]}
+            per_section=policy.max_per_section,
+        )
+        queue: List[str] = policy.rank(policy.intake(candidates))
+        known = {site_crawl.norm(link) for link in [url, *candidates]}
 
         while queue and policy.wants_more():
             link = queue.pop(0)
@@ -775,15 +779,14 @@ class SiteAnalyzer:
 
             # Ссылки внутренней страницы расширяют обход: до оффера бывает три
             # уровня вложенности, и с главной они не видны.
-            added = False
-            for deeper in self.internal_links(
+            fresh = self.internal_links(
                 url, [(link, extra_html)], known, site_crawl.MAX_NEW_LINKS_PER_PAGE
-            ):
-                key = site_crawl.norm(deeper)
-                if key not in known:
-                    known.add(key)
-                    queue.append(deeper)
-                    added = True
+            )
+            known.update(site_crawl.norm(deeper) for deeper in fresh)
+            added = False
+            for deeper in policy.intake(fresh):
+                queue.append(deeper)
+                added = True
             # Порядок пересчитывают после каждой страницы: «новый раздел» и
             # «место ещё есть» меняются по мере чтения, а ссылка на вторую
             # страницу листинга стоит в конце списка — ниже карточек товаров.

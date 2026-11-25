@@ -7,22 +7,35 @@
 
 Разделение простое: читает обход много страниц, а в прозу идут только те, где
 содержание действительно новое. Остальные работают фактами — проверками разметки,
-дословными телефонами и ценами, списком ссылок для пробы.
+дословными телефонами и ценами, списком ссылок для пробы. Файлы по ссылкам —
+картинки, PDF каталога, прайс в Excel — обход не качает вовсе: читаемого текста
+в ответе нет, а время аудита есть; живость этих адресов проверяет проба ссылок.
 
 Сети здесь нет: скачивание делает анализатор, а этот модуль считает, что уже
 видено, куда идти дальше и почему отказал.
+
+Ширина охвата держится порядком очереди (новый раздел идёт вперёд карточек),
+а потолок раздела — долей бюджета обхода: на сайте, где всё содержание лежит в
+одном каталоге, жёсткая четвёрка бросает обход на половине прочитанного.
 """
 
 import hashlib
+import math
 import re
 import time
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urldefrag, urlparse
 
 # Страниц обхода больше, чем страниц в тексте: модель читает выбранное, код
 # смотрит всё. 18 — потолок по времени, а не по вкусу.
 MAX_CRAWL_PAGES = 18
 MAX_PAGES_PER_SECTION = 4
+# Потолком раздела измеряется доля бюджета обхода. Ширина охвата держится
+# порядком очереди — новые разделы идут первыми, — а потолок нужен, чтобы один
+# раздел не съел всё. На tateng.ru весь сайт живёт в «/katalog-produktsii»:
+# потолок в четыре страницы прочитал девять из восемнадцати и ушёл, оставив
+# девять страниц бюджета и двадцать два адреса каталога непроверенными.
+MAX_SECTION_SHARE = 0.5
 MAX_PAGES_PER_GROUP = 3
 # Ссылок с прочитанной страницы берём много: их разбор стоит только чтения
 # HTML в памяти, а не запроса. Отрезать пришлось бы пагинацию — на листингах
@@ -59,6 +72,18 @@ PAGED_PATH = re.compile(r"/page/(\d+)(/?$)", re.I)
 # цифрами» — это другие предложения клиенту, а не дубль.
 WORD = re.compile(r"[а-яёa-z]{3,}|\d{2,}", re.I)
 
+# Ссылки, по которым лежит файл, а не страница сайта. Скачивать их в обходе
+# смысла нет: читаемого текста в ответе нет, а время и трафик есть — на tateng.ru
+# так ушли три десятка запросов на картинки и PDF каталога вместо страниц.
+# Для проверки ссылок эти адреса остаются: битый сертификат-PDF — находка.
+FILE_EXTENSIONS = (
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tiff",
+    ".pdf", ".doc", ".docx", ".rtf", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
+    ".ods", ".csv", ".zip", ".rar", ".7z", ".gz", ".tar", ".exe", ".dmg", ".apk",
+    ".mp3", ".mp4", ".avi", ".mov", ".webm", ".js", ".css", ".xml", ".json",
+)
+FILE_SAMPLES = 3
+
 # Причины, по которым страница не попала в обход. Перечислены явно: «не
 # проверено всё» и «проверено всё» — разные выводы для клиента.
 REASONS = {
@@ -78,6 +103,28 @@ def norm(url: str) -> str:
 def section_of(url: str) -> str:
     """Первый сегмент пути: «каталог», «uslugi», «kontakty»."""
     return (urlparse(url).path.strip("/").split("/") or [""])[0].lower()
+
+
+def section_allowance(limit: int) -> int:
+    """Сколько страниц одного раздела обход прочитает.
+
+    Не меньше MAX_PAGES_PER_SECTION — иначе короткий обход целиком отдаётся
+    одному разделу, — и не больше половины бюджета: на сайте, где всё спрятано
+    в каталоге, жёсткий потолок оставляет бюджет обхода неиспользованным.
+    """
+    budget = max(0, int(limit))
+    share = math.ceil(budget * MAX_SECTION_SHARE)
+    return int(max(MAX_PAGES_PER_SECTION, min(share, budget)))
+
+
+def is_file(url: str) -> bool:
+    """Ведёт ли ссылка на файл вместо страницы.
+
+    Проверка по пути, а не по расширению всего адреса: «catalog.pdf?from=mail»
+    — тот же файл, а «/katalog/» со слэшем — страница.
+    """
+    path = (urlparse(str(url or "")).path or "").lower()
+    return path.endswith(FILE_EXTENSIONS)
 
 
 def pagination_of(url: str) -> Tuple[str, int]:
@@ -127,14 +174,18 @@ class CrawlPolicy:
     """
 
     def __init__(self, max_pages: int = MAX_CRAWL_PAGES,
-                 max_per_section: int = MAX_PAGES_PER_SECTION,
+                 max_per_section: Optional[int] = None,
                  max_per_group: int = MAX_PAGES_PER_GROUP,
                  min_chars: int = MIN_PAGE_CHARS,
                  novelty_floor: float = NOVELTY_FOR_TEXT,
                  budget: float = CRAWL_BUDGET_SECONDS,
                  clock: Callable[[], float] = time.monotonic):
         self.max_pages = max_pages
-        self.max_per_section = max_per_section
+        # Потолок раздела считается от бюджета, а не задан навсегда: с жёсткой
+        # четвёркой обход уходит, не выбрав и половины отведённых страниц.
+        self.max_per_section = (
+            int(max_per_section) if max_per_section is not None else section_allowance(max_pages)
+        )
         self.max_per_group = max_per_group
         self.min_chars = min_chars
         self.novelty_floor = novelty_floor
@@ -146,12 +197,45 @@ class CrawlPolicy:
         self.duplicates: List[Dict] = []
         self.failures: List[Dict] = []
         self.refused: Dict[str, int] = {}
+        self.files: List[str] = []
+        self.file_total = 0
+        self._file_keys: set = set()
         self.lexicon: set = set()
         self._signs: Dict[str, str] = {}
         self.stopped = ""
         self.pending = 0
 
     # --- решения до скачивания ------------------------------------------------
+
+    def intake(self, links: List[str]) -> List[str]:
+        """Ссылки, которые стоит читать: файлы обход не качает.
+
+        Считаются отдельно: «пропущено 31 файл» и «пропущено 31 страницу» —
+        разные выводы для клиента, и второе потребовало бы объяснения, где именно
+        обход не был.
+        """
+        pages: List[str] = []
+        for link in links or []:
+            if is_file(link):
+                self.note_file(link)
+                continue
+            pages.append(link)
+        return pages
+
+    def note_file(self, url: str) -> None:
+        """Ссылка ведёт на файл, а не на страницу.
+
+        Адрес считается один раз: на Bitrix один и тот же PDF каталога лежит
+        в меню каждой страницы, и «файлов: 31» вместо «файлов: 3» было бы
+        шумом в статистике.
+        """
+        key = norm(url)
+        if key in self._file_keys:
+            return
+        self._file_keys.add(key)
+        self.file_total += 1
+        if len(self.files) < FILE_SAMPLES:
+            self.files.append(key)
 
     def reason_for(self, url: str) -> str:
         """Почему страницу брать нельзя. Пустая строка — можно."""
@@ -314,6 +398,8 @@ class CrawlPolicy:
             "sections": sections,
             "duplicates": self.duplicates,
             "failures": self.failures,
+            "files": self.file_total,
+            "file_samples": list(self.files),
             "refused": dict(self.refused),
             "pending": self.pending,
             "stopped": self.stopped,
@@ -375,11 +461,23 @@ def build_crawl_checks(crawl: Dict) -> Dict:
             "цены на второй и третьей странице могли отличаться от первой")
     stopped = crawl.get("stopped") or ""
     pending = int(crawl.get("pending") or 0)
-    if stopped or pending or refused.get("budget") or refused.get("time"):
-        seen = stopped or "достигнут потолок страниц обхода"
+    # Отказ по потолку раздела — тоже недосмотр: очередь пуста, а половина
+    # содержания сайта прочитана не была.
+    section_skipped = int(refused.get("section") or 0)
+    if stopped or pending or section_skipped or refused.get("budget") or refused.get("time"):
+        # Причина называется та, что случилась: у сайтов с одним большим разделом
+        # очередь кончается раньше потолка страниц, и «достигнут потолок» был бы
+        # неправдой, снимающей с аудита ответственность за недочитанное.
+        parts: List[str] = []
+        if stopped:
+            parts.append(stopped)
+        elif refused.get("budget") or refused.get("time"):
+            parts.append("достигнут потолок страниц обхода")
+        if section_skipped:
+            parts.append(f"в разделах прочитано не всё: {section_skipped}")
         if pending:
-            seen += f", ссылок осталось непроверенными: {pending}"
-        row("Полнота обхода", seen, CHECK, "часть ссылок осталась непроверенной")
+            parts.append(f"ссылок осталось непроверенными: {pending}")
+        row("Полнота обхода", "; ".join(parts), CHECK, "часть ссылок осталась непроверенной")
     duplicates = crawl.get("duplicates") or []
     row(
         "Дубликаты содержания",
@@ -394,6 +492,13 @@ def build_crawl_checks(crawl: Dict) -> Dict:
             "; ".join(item.get("url", "") for item in failures[:3]),
             BAD,
             "ссылка есть в меню, а страницы нет — это потерянные заявки")
+    files = int(crawl.get("files") or 0)
+    if files:
+        names = ", ".join(item.rsplit("/", 1)[-1] for item in (crawl.get("file_samples") or [])[:2])
+        row("Ссылки на файлы",
+            f"файлов вместо страниц: {files}" + (f", например {names}" if names else ""),
+            OK,
+            "обход читает страницы, а живость этих адресов проверяет проба ссылок")
     if refused.get("thin"):
         row("Страницы без текста", f"служебных или почти пустых: {refused['thin']}", CHECK,
             "такие адреса отдают шаблон вместо содержания — проверить руками")
@@ -439,7 +544,8 @@ def render_crawl(crawl: Dict) -> str:
         "## Глубина обхода (посчитано кодом)",
         f"Прочитано страниц: {pages} из {int(crawl.get('limit') or MAX_CRAWL_PAGES)}; "
         f"разделы: {', '.join(crawl.get('sections') or []) or 'не определены'}",
-        f"Дубликатов содержания: {len(duplicates)}; не открылось страниц: {len(failures)}",
+        f"Дубликатов содержания: {len(duplicates)}; не открылось страниц: {len(failures)}; "
+        f"файлов по ссылкам вместо страниц: {int(crawl.get('files') or 0)}",
     ]
     if quoted and quoted < pages:
         lines.append(
@@ -454,6 +560,13 @@ def render_crawl(crawl: Dict) -> str:
         )
     if failures:
         lines.append("Не открылись: " + "; ".join(item.get("url", "") for item in failures[:5]))
+    section_skipped = int((crawl.get("refused") or {}).get("section") or 0)
+    if section_skipped:
+        lines.append(
+            f"Из раздела прочитаны не все страницы (отклонено ссылок: {section_skipped}): "
+            "полного ассортимента и цен сайта не знаете — о том, чего не видели, "
+            "пишите как что проверить, а не как вывод."
+        )
     if crawl.get("stopped"):
         lines.append(f"Обход остановлен: {crawl['stopped']} — ниже по списку ссылки не проверены")
     return "\n".join(lines)

@@ -89,6 +89,7 @@ class FakeSite:
     def __init__(self, pages):
         self.pages = {crawl.norm(url): html for url, html in pages.items()}
         self.order = []
+        self.probed = []
 
     def __call__(self, url):
         key = crawl.norm(url)
@@ -99,6 +100,7 @@ class FakeSite:
         return html
 
     def status_probe(self, url, method="GET"):
+        self.probed.append(crawl.norm(url))
         return {"status": 0, "text": "", "chain": []}
 
 
@@ -131,6 +133,15 @@ def test_a_different_listing_is_a_different_group():
         crawl.pagination_of("https://tateng.ru/catalog")[0]
         != crawl.pagination_of("https://tateng.ru/uslugi")[0]
     )
+
+
+def test_file_links_are_not_pages():
+    assert crawl.is_file("https://tateng.ru/images/docs/10.jpg")
+    assert crawl.is_file("https://tateng.ru/katalog/CATALOG.PDF")
+    assert crawl.is_file("https://tateng.ru/price.xlsx?v=2")
+    assert not crawl.is_file("https://tateng.ru/katalog-produktsii/")
+    assert not crawl.is_file("https://tateng.ru/catalog?PAGEN_1=2")
+    assert not crawl.is_file("https://tateng.ru/pdf")
 
 
 def test_numbers_make_content_new():
@@ -202,6 +213,41 @@ def test_listing_group_stops_at_its_depth():
 
     assert policy.reason_for("https://tateng.ru/catalog?PAGEN_1=3") == "group"
     assert policy.reason_for("https://tateng.ru/catalog/page/9/") == "group"
+
+
+def test_section_allowance_scales_with_the_budget():
+    """Потолок раздела — доля бюджета: жёсткая четвёрка бросает обход на середине."""
+    assert crawl.section_allowance(crawl.MAX_CRAWL_PAGES) == 9
+    assert crawl.section_allowance(4) == crawl.MAX_PAGES_PER_SECTION, (
+        "маленький бюджет не отдаётся одному разделу целиком"
+    )
+    assert crawl.section_allowance(0) == crawl.MAX_PAGES_PER_SECTION
+    assert crawl.CrawlPolicy(max_pages=18).max_per_section == crawl.section_allowance(18)
+    assert crawl.CrawlPolicy(max_per_section=2).max_per_section == 2, (
+        "явный потолок важнее расчёта от бюджета"
+    )
+
+
+def test_intake_counts_files_once_and_keeps_pages():
+    """Файл не страница: его не качают, но его адрес не теряет из виду."""
+    policy = crawl.CrawlPolicy()
+    links = [
+        "https://tateng.ru/catalog",
+        "https://tateng.ru/images/docs/10.jpg",
+        "https://tateng.ru/katalog/catalog.pdf",
+    ]
+
+    assert policy.intake(links) == ["https://tateng.ru/catalog"]
+    assert policy.intake(links) == ["https://tateng.ru/catalog"], (
+        "тот же адрес не считается второй раз"
+    )
+    summary = policy.summary()
+    assert summary["pages"] == 0, "файлы не читаются и не занимают место страниц"
+    assert summary["files"] == 2
+    assert summary["file_samples"] == [
+        "https://tateng.ru/images/docs/10.jpg",
+        "https://tateng.ru/katalog/catalog.pdf",
+    ]
 
 
 def test_time_budget_decides_before_a_request_is_spent():
@@ -344,6 +390,7 @@ def test_every_row_shows_a_shared_verdict_word():
         "duplicates": [{"url": "https://tateng.ru/m", "same_as": "https://tateng.ru/"}],
         "refused": {"section": 4, "thin": 2}, "pending": 6, "stopped": crawl.REASONS["budget"],
         "failures": [{"url": "https://tateng.ru/gone", "reason": "timeout"}],
+        "files": 31, "file_samples": ["https://tateng.ru/katalog/catalog_rosreestr_1_9.pdf"],
         "seconds": 48.0, "budget": 50.0,
     })
 
@@ -352,9 +399,44 @@ def test_every_row_shows_a_shared_verdict_word():
         assert len(row) == 3 and all(cell.strip() for cell in row), row
         assert row[2].split(" —")[0] in (crawl.OK, crawl.CHECK, crawl.BAD), row
     assert "ссылок осталось непроверенными: 6" in row_of(table, "Полнота обхода")[1]
+    assert "в разделах прочитано не всё: 4" in row_of(table, "Полнота обхода")[1], (
+        "раздел, прочитанный не целиком, — недосмотр, даже если очередь пуста"
+    )
     assert "служебных или почти пустых: 2" in row_of(table, "Страницы без текста")[1]
+    files_row = row_of(table, "Ссылки на файлы")
+    assert files_row[1].startswith("файлов вместо страниц: 31"), (
+        "пропущенные файлы — не пропущенные страницы: у них другой вывод"
+    )
+    assert "catalog_rosreestr_1_9.pdf" in files_row[1], "клиент обязан понять, что именно не читали"
+    assert files_row[2].startswith(crawl.OK)
     assert "tateng.ru/m совпадает с https://tateng.ru/" in row_of(table, "Дубликаты содержания")[2], (
         "дубль называют адресами, иначе клиент не поймёт, какой адрес чистить"
+    )
+
+
+def test_shortfall_row_names_the_reason_that_actually_happened():
+    """«Потолок страниц» и «дочитали не всё» — разные причины, и путать их нельзя."""
+    base = {
+        "text_pages": 6, "sections": ["catalog"], "depth": 2, "paged": 0,
+        "duplicates": [], "failures": [], "pending": 0, "stopped": "",
+        "seconds": 20.0, "budget": 50.0,
+    }
+    by_pages = crawl.build_crawl_checks(dict(base, pages=18, limit=18,
+                                            refused={"budget": 9, "section": 3}))
+    by_section = crawl.build_crawl_checks(dict(base, pages=11, limit=18,
+                                               refused={"section": 7}))
+    by_time = crawl.build_crawl_checks(dict(base, pages=10, limit=18,
+                                            refused={"time": 2},
+                                            stopped=crawl.REASONS["time"]))
+
+    assert row_of(by_pages, "Полнота обхода")[1].startswith("достигнут потолок страниц обхода")
+    assert "в разделах прочитано не всё: 3" in row_of(by_pages, "Полнота обхода")[1]
+    assert row_of(by_section, "Полнота обхода")[1] == "в разделах прочитано не всё: 7", (
+        "очередь кончилась, а не бюджет страниц: врать про потолок нельзя"
+    )
+    cell = row_of(by_time, "Полнота обхода")[1]
+    assert cell.startswith(crawl.REASONS["time"]) and "потолок страниц" not in cell, (
+        "исчерпанное время — не достигнутый потолок страниц"
     )
 
 
@@ -370,7 +452,7 @@ def test_prompt_block_marks_the_ceiling_of_the_review():
         "duplicates": [{"url": "https://tateng.ru/print", "same_as": "https://tateng.ru/catalog"}],
         "failures": [{"url": "https://tateng.ru/broken", "reason": "404"}],
         "refused": {"section": 3}, "pending": 5, "stopped": crawl.REASONS["budget"],
-        "seconds": 30.0, "budget": 50.0,
+        "files": 4, "seconds": 30.0, "budget": 50.0,
     })
 
     assert block.startswith("## Глубина обхода")
@@ -378,6 +460,12 @@ def test_prompt_block_marks_the_ceiling_of_the_review():
     assert "https://tateng.ru/print = https://tateng.ru/catalog" in block
     assert "Не открылись: https://tateng.ru/broken" in block
     assert "Обход остановлен" in block
+    assert "файлов по ссылкам вместо страниц: 4" in block, (
+        "модель обязана знать, что файлы не читались, и не писать «на сайте нет прайса»"
+    )
+    assert "прочитаны не все страницы (отклонено ссылок: 3)" in block, (
+        "раздел, прочитанный не целиком, ограничивает выводы модели про ассортимент"
+    )
 
 
 def test_coverage_does_not_pass_read_pages_off_as_quoted():
@@ -411,6 +499,12 @@ def test_crawl_reads_more_pages_than_the_model_is_given(analyzer, monkeypatch):
             ("/katalog-produktsii/shurup", "Группа шурупы"),
             ("/katalog-produktsii/gajka", "Группа гайки"),
             ("/katalog-produktsii/zaklepki", "Группа заклёпки"),
+            ("/katalog-produktsii/shpilka", "Группа шпильки"),
+            ("/katalog-produktsii/otvod", "Группа отводы"),
+            ("/katalog-produktsii/perforator", "Группа перфораторы"),
+            ("/katalog-produktsii/barabashka", "Группа барабашка"),
+            ("/katalog-produktsii/cep", "Группа цепь"),
+            ("/katalog-produktsii/klyuch", "Группа ключи"),
         ]),
         HOME + "/catalog": make_page("Каталог", filler("фрезы")),
         HOME + "/prices": make_page("Цены", PRICE_TEXT * 2),
@@ -420,6 +514,8 @@ def test_crawl_reads_more_pages_than_the_model_is_given(analyzer, monkeypatch):
     for path, topic in (
         ("balka", "балка"), ("truba", "труба"), ("shesternya", "шестерня"),
         ("shurup", "шуруп"), ("gajka", "гайка"), ("zaklepki", "заклёпка"),
+        ("shpilka", "шпилька"), ("otvod", "отвод"), ("perforator", "перфоратор"),
+        ("barabashka", "барабашка"), ("cep", "цепь"), ("klyuch", "ключ"),
     ):
         pages[f"{HOME}/katalog-produktsii/{path}"] = make_page(
             f"Группа {topic}", filler(topic)
@@ -438,8 +534,49 @@ def test_crawl_reads_more_pages_than_the_model_is_given(analyzer, monkeypatch):
     assert summary["depth"] == 2, "обход обязан видеть третий уровень вложенности"
     assert "Цены" in text and "Доставка" in text, "новое содержание обязано дойти до модели"
     groups = [key for key in site.order if "katalog-produktsii" in key]
-    assert len(groups) == crawl.MAX_PAGES_PER_SECTION, (
-        "один раздел не имеет права вытеснить из обхода остальные"
+    assert len(groups) == crawl.section_allowance(crawl.MAX_CRAWL_PAGES), (
+        "раздел ограничен долей бюджета: не вытесняет остальные разделы, "
+        "но и не бросает обход на четырёх страницах"
+    )
+    assert summary["pages"] >= 12, "неизрасходованный бюджет обхода — недосмотр аудита"
+
+
+def test_catalog_heavy_site_uses_its_page_budget(analyzer, monkeypatch):
+    """Один раздел на весь сайт: бюджет обхода выбирается, а не простаивает.
+
+    На tateng.ru содержание лежит в «/katalog-produktsii»: с жёстким потолком
+    на четыре страницы обход прочитал девять из восемнадцати и ушёл с пустой
+    очередью, оставив двадцать два адреса каталога непроверенными.
+    """
+    brands = [
+        (f"/katalog-produktsii/brand{index:02d}", f"Бренд {index}") for index in range(1, 16)
+    ]
+    pages = {
+        HOME + "/": make_page("Завод метизов", filler("метизы"), [
+            ("/kontakty", "Контакты"), ("/katalog-produktsii", "Каталог продукции"),
+        ]),
+        HOME + "/kontakty": make_page("Контакты", CONTACT_TEXT * 2),
+        HOME + "/katalog-produktsii": make_page("Каталог", filler("каталог"), brands),
+    }
+    for index in range(1, 16):
+        pages[f"{HOME}/katalog-produktsii/brand{index:02d}"] = make_page(
+            f"Бренд {index:02d}", distinct(index)
+        )
+
+    site, _, _, facts = collect(analyzer, monkeypatch, pages)
+    summary = facts["crawl"]
+    read = [key for key in site.order if "katalog-produktsii" in key]
+
+    assert len(read) == crawl.section_allowance(crawl.MAX_CRAWL_PAGES), (
+        "каталог читается до доли бюджета, а не до жёсткой четвёрки"
+    )
+    assert summary["pages"] == 2 + len(read)
+    assert summary["refused"].get("section"), "потолок раздела остался потолком"
+    assert summary["pending"] == 0 and summary["stopped"] == ""
+    full = row_of(crawl.build_crawl_checks(summary), "Полнота обхода")
+    assert "в разделах прочитано не всё" in full[1]
+    assert "потолок страниц" not in full[1], (
+        "очередь опустела из-за потолка раздела, а не из-за бюджета страниц"
     )
 
 
@@ -616,6 +753,53 @@ def test_thin_pages_are_counted_and_said_loudly(analyzer, monkeypatch):
     assert "служебных или почти пустых: 1" in row_of(
         crawl.build_crawl_checks(facts["crawl"]), "Страницы без текста"
     )[1]
+
+
+def test_files_are_probed_but_never_read(analyzer, monkeypatch):
+    """PDF каталога — не страница: его адрес проверяют, но не качают в обход.
+
+    На реальных сайтах на Bitrix в меню висит десяток картинок и PDF: скачивая
+    их как страницы, обход спускает бюджет времени на бинарные ответы и
+    приносит клиенту строку «почти пустых страниц: 34» там, где страниц нет вовсе.
+    Ссылки внутренней страницы проверяются так же: второй PDF лежит глубоко в
+    каталоге и с главной не виден.
+    """
+    pages = {
+        HOME + "/": make_page("Завод метизов", filler("метизы"), [
+            ("/catalog", "Каталог"),
+            ("/katalog/catalog_rosreestr_1_9.pdf", "Каталог продукции"),
+            ("/images/docs/10.jpg", "Сертификаты"),
+            ("/price.xlsx", "Прайс-лист"),
+        ]),
+        HOME + "/catalog": make_page("Каталог", filler("фрезы"), [
+            ("/warranty", "Гарантия поставщика"),
+            ("/kontakty", "Контакты"),
+            ("/katalog/catalog_rosreestr_2_9.pdf", "Каталог продукции, лист 2"),
+        ]),
+        # «Гарантия» ссылается на прочитанные адреса: кандидат, уже взятый в
+        # очередь с главной, не должен открываться второй раз с внутренней страницы.
+        HOME + "/warranty": make_page("Гарантия", filler("гарантия"), [
+            ("/kontakty", "Контакты"), ("/catalog", "Каталог"),
+        ]),
+        HOME + "/kontakty": make_page("Контакты", CONTACT_TEXT * 2),
+    }
+
+    site, _, _, facts = collect(analyzer, monkeypatch, pages)
+    summary = facts["crawl"]
+    table = crawl.build_crawl_checks(summary)
+
+    assert not [key for key in site.order if crawl.is_file(key)], (
+        "обход скачал файл вместо страницы"
+    )
+    assert summary["files"] == 4, "файл с внутренней страницы учтён так же, как с главной"
+    assert summary["pages"] == len(site.order) == len(set(site.order)), (
+        "одна страница не качается дважды"
+    )
+    assert summary["refused"].get("thin") is None, "файл не должен становиться «пустой страницей»"
+    assert "catalog_rosreestr_1_9.pdf" in row_of(table, "Ссылки на файлы")[1]
+    assert "https://tateng.ru/katalog/catalog_rosreestr_1_9.pdf" in site.probed, (
+        "живость файла проверяет проба ссылок: битый каталог — находка клиента"
+    )
 
 
 def test_crawl_joins_every_facts_prompt(analyzer):

@@ -16,6 +16,10 @@ HTML на месте карты назван картой, HEAD-отклик с�
 отпечаток содержания различает цены, дубль не притворяется источником,
 прочитанное не выдаётся за процитированное, а хвост очереди не исчезает молча
 — остановка названа по имени: кончилось время или достигнут потолок страниц.
+Дальше — файл не страница: его адрес считается один раз, в обход не качается
+и живость свою проверяет пробой ссылок, а не пустой страницей в отчёте.
+Дальше — потолок раздела считается долей бюджета: на сайте, где всё содержание
+в одном каталоге, обход обязан выбрать страницы, а не уйти с половиной бюджета.
 """
 
 import os
@@ -818,8 +822,8 @@ MUTATIONS = [
     (
         "crawl: хвост очереди скрыт из строки полноты",
         "app/services/site_crawl.py",
-        '        if pending:\n            seen += f", ссылок осталось непроверенными: {pending}"',
-        '        if False:\n            seen += f", ссылок осталось непроверенными: {pending}"',
+        '        if pending:\n            parts.append(f"ссылок осталось непроверенными: {pending}")',
+        '        if False:\n            parts.append(f"ссылок осталось непроверенными: {pending}")',
     ),
     (
         "crawl: дубликаты содержания — норма",
@@ -959,6 +963,145 @@ MUTATIONS = [
         'OK = "норма"',
         'OK = "ok"',
     ),
+    (
+        "crawl: файл признан страницей",
+        "app/services/site_crawl.py",
+        "    return path.endswith(FILE_EXTENSIONS)",
+        "    return False",
+    ),
+    (
+        "crawl: расширение проверено по всему адресу, а не по пути",
+        "app/services/site_crawl.py",
+        '    path = (urlparse(str(url or "")).path or "").lower()',
+        '    path = str(url or "").lower()',
+    ),
+    (
+        "crawl: из файлов признаны только PDF",
+        "app/services/site_crawl.py",
+        "    return path.endswith(FILE_EXTENSIONS)",
+        '    return path.endswith((".pdf",))',
+    ),
+    (
+        "crawl: образцы файлов не сохраняются",
+        "app/services/site_crawl.py",
+        "FILE_SAMPLES = 3",
+        "FILE_SAMPLES = 0",
+    ),
+    (
+        "crawl: intake не отбирает файлы из ссылок",
+        "app/services/site_crawl.py",
+        "            if is_file(link):",
+        "            if False:",
+    ),
+    (
+        "crawl: файл остался в списке страниц после учёта",
+        "app/services/site_crawl.py",
+        "                self.note_file(link)\n                continue\n            pages.append(link)",
+        "                self.note_file(link)\n            pages.append(link)",
+    ),
+    (
+        "crawl: один файл посчитан с каждого меню",
+        "app/services/site_crawl.py",
+        "        if key in self._file_keys:\n            return",
+        "        if False:\n            return",
+    ),
+    (
+        "crawl: файлы не посчитаны в итоге",
+        "app/services/site_crawl.py",
+        "        self.file_total += 1",
+        "        pass",
+    ),
+    (
+        "crawl: сводка не знает числа файлов",
+        "app/services/site_crawl.py",
+        '            "files": self.file_total,',
+        '            "files": 0,',
+    ),
+    (
+        "crawl: сводка не помнит имён файлов",
+        "app/services/site_crawl.py",
+        '            "file_samples": list(self.files),',
+        '            "file_samples": [],',
+    ),
+    (
+        "crawl: строка о файлах не выходит в таблицу",
+        "app/services/site_crawl.py",
+        '    files = int(crawl.get("files") or 0)\n    if files:',
+        '    files = int(crawl.get("files") or 0)\n    if False:',
+    ),
+    (
+        "crawl: какие файлы пропущены — клиенту не сказано",
+        "app/services/site_crawl.py",
+        'f", например {names}" if names else ""',
+        '""',
+    ),
+    (
+        "crawl: модель не знает, что файлы не читались",
+        "app/services/site_crawl.py",
+        '        f"Дубликатов содержания: {len(duplicates)}; не открылось страниц: {len(failures)}; "\n'
+        '        f"файлов по ссылкам вместо страниц: {int(crawl.get(\'files\') or 0)}",',
+        '        f"Дубликатов содержания: {len(duplicates)}; не открылось страниц: {len(failures)}",',
+    ),
+    (
+        "crawl: доля бюджета на раздел выключена",
+        "app/services/site_crawl.py",
+        "MAX_SECTION_SHARE = 0.5",
+        "MAX_SECTION_SHARE = 0.0",
+    ),
+    (
+        "crawl: раздел получил весь бюджет обхода",
+        "app/services/site_crawl.py",
+        "MAX_SECTION_SHARE = 0.5",
+        "MAX_SECTION_SHARE = 2.0",
+    ),
+    (
+        "crawl: короткий бюджет отдан одному разделу",
+        "app/services/site_crawl.py",
+        "    return int(max(MAX_PAGES_PER_SECTION, min(share, budget)))",
+        "    return int(max(1, min(share, budget)))",
+    ),
+    (
+        "crawl: потолок раздела не зависит от бюджета обхода",
+        "app/services/site_crawl.py",
+        "            int(max_per_section) if max_per_section is not None else section_allowance(max_pages)",
+        "            int(max_per_section) if max_per_section is not None else MAX_PAGES_PER_SECTION",
+    ),
+    (
+        "crawl: явный потолок раздела перезаписан расчётом",
+        "app/services/site_crawl.py",
+        "            int(max_per_section) if max_per_section is not None else section_allowance(max_pages)",
+        "            section_allowance(max_pages)",
+    ),
+    (
+        "crawl: недочитанный раздел не попал в таблицу",
+        "app/services/site_crawl.py",
+        "    if stopped or pending or section_skipped or refused.get(\"budget\") or refused.get(\"time\"):",
+        "    if stopped or pending or refused.get(\"budget\") or refused.get(\"time\"):",
+    ),
+    (
+        "crawl: сколько страниц раздела не читали — не сказано",
+        "app/services/site_crawl.py",
+        '        if section_skipped:\n            parts.append(f"в разделах прочитано не всё: {section_skipped}")',
+        "        if section_skipped:\n            pass",
+    ),
+    (
+        "crawl: настоящая причина недосмотра подменена потолком страниц",
+        "app/services/site_crawl.py",
+        "        if stopped:\n            parts.append(stopped)",
+        "        if False:\n            parts.append(stopped)",
+    ),
+    (
+        "crawl: опустевшая очередь объявлена потолком страниц",
+        "app/services/site_crawl.py",
+        '        elif refused.get("budget") or refused.get("time"):\n            parts.append("достигнут потолок страниц обхода")',
+        '        else:\n            parts.append("достигнут потолок страниц обхода")',
+    ),
+    (
+        "crawl: модель не знает о недочитанном разделе",
+        "app/services/site_crawl.py",
+        '            f"Из раздела прочитаны не все страницы (отклонено ссылок: {section_skipped}): "',
+        '            ""',
+    ),
     # --- Обход в составе анализа и отчёта ------------------------------------
     (
         "analyzer: главная вошла в обход без права на тонкий текст",
@@ -975,8 +1118,14 @@ MUTATIONS = [
     (
         "analyzer: с главной берут по одной ссылке раздела",
         "app/services/analyzer.py",
-        "            per_section=site_crawl.MAX_PAGES_PER_SECTION,",
+        "            per_section=policy.max_per_section,",
         "            per_section=1,",
+    ),
+    (
+        "analyzer: кандидатов с главной режет жёсткая четвёрка",
+        "app/services/analyzer.py",
+        "            per_section=policy.max_per_section,",
+        "            per_section=site_crawl.MAX_PAGES_PER_SECTION,",
     ),
     (
         "analyzer: очередь не пересортирована после прочитанной страницы",
@@ -987,8 +1136,35 @@ MUTATIONS = [
     (
         "analyzer: ссылки внутренней страницы не расширяют обход",
         "app/services/analyzer.py",
-        "                    queue.append(deeper)",
-        "                    pass",
+        "            for deeper in policy.intake(fresh):\n"
+        "                queue.append(deeper)\n"
+        "                added = True",
+        "            for deeper in policy.intake(fresh):\n"
+        "                pass",
+    ),
+    (
+        "analyzer: файл с внутренней страницы качается как страница",
+        "app/services/analyzer.py",
+        "            for deeper in policy.intake(fresh):",
+        "            for deeper in fresh:",
+    ),
+    (
+        "analyzer: файл с главной качается как страница",
+        "app/services/analyzer.py",
+        "        queue: List[str] = policy.rank(policy.intake(candidates))",
+        "        queue: List[str] = policy.rank(candidates)",
+    ),
+    (
+        "analyzer: найденные ссылки не помечены известными",
+        "app/services/analyzer.py",
+        "            known.update(site_crawl.norm(deeper) for deeper in fresh)",
+        "            pass",
+    ),
+    (
+        "analyzer: известные ссылки не помнят кандидатов с главной",
+        "app/services/analyzer.py",
+        "        known = {site_crawl.norm(link) for link in [url, *candidates]}",
+        "        known = {site_crawl.norm(link) for link in [url]}",
     ),
     (
         "analyzer: не открывшаяся страница пропала без следа",
