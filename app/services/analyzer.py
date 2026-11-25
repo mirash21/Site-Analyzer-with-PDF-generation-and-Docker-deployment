@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse, urldefrag
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Tuple
-from app.services import site_crawl, site_infra, site_signals, site_speed
+from app.services import site_crawl, site_infra, site_score, site_signals, site_speed
 from app.services.llm_client import LLMClient
 
 
@@ -148,10 +148,12 @@ REPORT_SECTION_ORDER = (
     "key_facts",
     "comparison_table",
     "site_gaps",
+    "site_score",
     "site_checks",
     "site_infra",
     "site_crawl",
     "site_speed",
+    "action_priorities",
     "ad_instructions",
     "keyword_seeds",
     "negative_keywords",
@@ -1644,6 +1646,11 @@ class SiteAnalyzer:
         if sources_table:
             result["sources"] = sources_table
 
+        score_caveats: List[str] = []
+        # Балл считает код, и только он: ключ с тем же именем из ответа модели
+        # читался бы как «посчитано кодом», поэтому его выкидываем заранее.
+        result.pop("site_score", None)
+        result.pop("action_priorities", None)
         # Потолочный разбор: читатель обязан видеть, сколько реально прочитано
         # и чего на страницах не было. Это считает код, а не модель.
         if sources:
@@ -1673,6 +1680,12 @@ class SiteAnalyzer:
             speed_checks = site_speed.build_speed_checks(speed) if speed else {"rows": []}
             if speed_checks["rows"]:
                 result["site_speed"] = speed_checks
+            # Балл и очередь работ — арифметика тех же таблиц: модель не делала
+            # проверок и не знает, сколько из них удалось посчитать вообще.
+            rating = site_score.assess(result)
+            result["site_score"] = rating["score"]
+            result["action_priorities"] = rating["priorities"]
+            score_caveats = rating["caveats"]
 
         for key in ("site_gaps", "risks_and_checks", "data_gaps"):
             values = cls._normalize_string_list(result.get(key))
@@ -1680,6 +1693,13 @@ class SiteAnalyzer:
                 result[key] = values
             else:
                 result.pop(key, None)
+
+        if score_caveats:
+            # Ось, не набравшая трёх посчитанных строк, обязана быть названа:
+            # молчаливый балл по половине проверок читается как полная оценка.
+            result["data_gaps"] = cls._unique(
+                list(result.get("data_gaps") or []) + score_caveats
+            )
 
         if facts is not None:
             # Отсутствие цен на сайте — вывод кода, а не модели: без этого

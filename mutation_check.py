@@ -25,6 +25,11 @@ HTML на месте карты назван картой, HEAD-отклик с�
 а неизмеренное остаётся «не проверено» — с пробелом в честном блоке. Вес, которого
 сервер не назвал, не превращается ни в «ноль байт», ни в «норму»: незваный вес
 статики остаётся измеренным только у тех файлов, где Content-Length был.
+Дальше — балл: «не проверено» не входит в знаменатель, но обязано быть названо,
+ось из двух строк в итог не идёт, полоса «готов вести трафик» снимается при любой
+незакрытой ошибке — даже в той оси, которая в балл не попала. Очередь работ
+сортируется по весу оси, молчание проверок не притворяется чистым счётом, а ноль
+отличается от «не посчитано».
 """
 
 import os
@@ -371,8 +376,8 @@ MUTATIONS = [
     (
         "analyzer: раздел проверок выпал из порядка чтения",
         "app/services/analyzer.py",
-        '    "site_gaps",\n    "site_checks",\n',
-        '    "site_gaps",\n',
+        '    "site_gaps",\n    "site_score",\n    "site_checks",\n',
+        '    "site_gaps",\n    "site_score",\n',
     ),
     (
         "pdf: раздел проверок вышел в PDF сырым ключом",
@@ -1945,6 +1950,306 @@ MUTATIONS = [
         '        "site_speed": "Скорость и мобильность сайта (посчитано кодом)",',
         "",
     ),
+    (
+        "pdf: раздел балла вышел в PDF сырым ключом",
+        "app/services/pdf_report.py",
+        '        "site_score": "Оценка сайта по осям (посчитано кодом)",',
+        "",
+    ),
+    (
+        "pdf: раздел приоритетов вышел в PDF сырым ключом",
+        "app/services/pdf_report.py",
+        '        "action_priorities": "Что чинить и в каком порядке (посчитано кодом)",',
+        "",
+    ),
+    (
+        "ui: интерфейс не знает названия раздела балла",
+        "frontend/src/utils/labels.js",
+        "  site_score: 'Оценка сайта по осям',",
+        "",
+    ),
+    (
+        "ui: интерфейс не знает названия очереди работ",
+        "frontend/src/utils/labels.js",
+        "  action_priorities: 'Что чинить и в каком порядке',",
+        "",
+    ),
+    (
+        "score: вывод читается из первой ячейки вместо третьей",
+        "app/services/site_score.py",
+        '    return str(cells[2] or "").split(" —")[0].strip()',
+        '    return str(cells[0] or "").split(" —")[0].strip()',
+    ),
+    (
+        "score: строка без ячейки вывода разбирается как вывод",
+        "app/services/site_score.py",
+        "    if len(cells) < 3:\n        return \"\"",
+        "    if len(cells) < 1:\n        return \"\"",
+    ),
+    (
+        "score: таблица считает строки короче трёх ячеек",
+        "app/services/site_score.py",
+        "        if isinstance(row, (list, tuple)) and len(row) >= 3",
+        "        if isinstance(row, (list, tuple))",
+    ),
+    (
+        "score: «проверить» получило полный балл",
+        "app/services/site_score.py",
+        "POINTS = {OK: 1.0, CHECK: 0.5, BAD: 0.0, MISSING: 0.0}",
+        "POINTS = {OK: 1.0, CHECK: 1.0, BAD: 0.0, MISSING: 0.0}",
+    ),
+    (
+        "score: отсутствующий счётчик спасает балл",
+        "app/services/site_score.py",
+        "POINTS = {OK: 1.0, CHECK: 0.5, BAD: 0.0, MISSING: 0.0}",
+        "POINTS = {OK: 1.0, CHECK: 0.5, BAD: 0.0, MISSING: 1.0}",
+    ),
+    (
+        "score: ошибка стоит как придирка",
+        "app/services/site_score.py",
+        "POINTS = {OK: 1.0, CHECK: 0.5, BAD: 0.0, MISSING: 0.0}",
+        "POINTS = {OK: 1.0, CHECK: 0.5, BAD: 0.5, MISSING: 0.0}",
+    ),
+    (
+        "score: незамеренное попало в знаменатель",
+        "app/services/site_score.py",
+        '    measured = counts["measured"]\n    gained = sum(',
+        '    measured = counts["total"]\n    gained = sum(',
+    ),
+    (
+        "score: ось из одной строки вошла в итог",
+        "app/services/site_score.py",
+        '        "counted": measured >= MIN_MEASURED,',
+        '        "counted": bool(measured),',
+    ),
+    (
+        "score: порог оси снят до одной проверки",
+        "app/services/site_score.py",
+        "MIN_MEASURED = 3",
+        "MIN_MEASURED = 1",
+    ),
+    (
+        "score: потолок осей не урезает знаменатель ошибки",
+        "app/services/site_score.py",
+        '    out["mistakes"] = out[BAD] + out[MISSING]',
+        '    out["mistakes"] = out[BAD]',
+    ),
+    (
+        "score: ошибка прощает верхнюю полосу не полностью",
+        "app/services/site_score.py",
+        "    if text == BANDS[0][1] and mistakes:",
+        "    if text == BANDS[0][1] and mistakes >= 3:",
+    ),
+    (
+        "score: порог готовности задран",
+        "app/services/site_score.py",
+        "READY_BAND = 85",
+        "READY_BAND = 95",
+    ),
+    (
+        "score: пустой отчёт притворился списком осей",
+        "app/services/site_score.py",
+        '    if not any(axis["counts"]["total"] for axis in axes):\n        return {\n            "columns": columns,\n            "rows": [["Итог", "кодовых таблиц проверок в отчёте нет",',
+        '    if False:\n        return {\n            "columns": columns,\n            "rows": [["Итог", "кодовых таблиц проверок в отчёте нет",',
+    ),
+    (
+        "score: оси пропали из таблицы — остался только итог",
+        "app/services/site_score.py",
+        "    rows: List[List[str]] = []\n    for axis in axes:",
+        "    rows: List[List[str]] = []\n    for axis in []:",
+    ),
+    (
+        "score: незасчитанная ось показала собственный балл",
+        "app/services/site_score.py",
+        '            (f"{axis[\'score\']}/100 · {_weight_note(axis[\'weight\'])}" if axis["counted"]',
+        '            (f"{axis[\'score\']}/100 · {_weight_note(axis[\'weight\'])}" if axis["counts"]["total"]',
+    ),
+    (
+        "score: нулевой балл показан как «не посчитан»",
+        "app/services/site_score.py",
+        '         if summary["axes"] else f"{UNKNOWN} — балл не посчитан"),',
+        '         if summary["total"] else f"{UNKNOWN} — балл не посчитан"),',
+    ),
+    (
+        "score: вес оси исчез из строки результата",
+        "app/services/site_score.py",
+        '    return f"вес оси {int(round(weight * 100))}%"',
+        '    return "вес оси не учтён"',
+    ),
+    (
+        "score: счёт норм не показывает придирки",
+        "app/services/site_score.py",
+        '    parts = [f"норма {counts[OK]}", f"проверить {counts[CHECK]}"]',
+        '    parts = [f"норма {counts[OK]}"]',
+    ),
+    (
+        "score: пустая ось названа нулём норм",
+        "app/services/site_score.py",
+        '        return "строк проверки в отчёте нет"',
+        '        return "норма 0, проверить 0"',
+    ),
+    (
+        "score: итог усреднён, а не взвешен",
+        "app/services/site_score.py",
+        '        total = int(round(sum(axis["weight"] * axis["score"] for axis in counted) / weight))',
+        '        total = int(round(sum(axis["score"] for axis in counted) / len(counted)))',
+    ),
+    (
+        "score: ошибка в отсеянной оси прощена",
+        "app/services/site_score.py",
+        '        "mistakes": sum(axis["counts"]["mistakes"] for axis in axes\n                        if axis["counts"]["total"]),',
+        '        "mistakes": sum(axis["counts"]["mistakes"] for axis in counted\n                        if axis["counts"]["total"]),',
+    ),
+    (
+        "score: придирки не попали в очередь работ",
+        "app/services/site_score.py",
+        "URGENCY_SEVERITY = {BAD: 1.0, MISSING: 1.0, CHECK: 0.5}",
+        "URGENCY_SEVERITY = {BAD: 1.0, MISSING: 1.0}",
+    ),
+    (
+        "score: норма и молчание записаны в очередь работ",
+        "app/services/site_score.py",
+        "            if severity is None:\n                continue",
+        "            if severity is None:\n                severity = 0.0",
+    ),
+    (
+        "score: очередь отсортирована по названию проверки",
+        "app/services/site_score.py",
+        "    found.sort(key=lambda item: -item[0])",
+        "    found.sort(key=lambda item: item[2])",
+    ),
+    (
+        "score: потолок очереди снят",
+        "app/services/site_score.py",
+        "    return [item[1:] for item in found[:limit]]",
+        "    return [item[1:] for item in found]",
+    ),
+    (
+        "score: строка очереди потеряла название оси",
+        "app/services/site_score.py",
+        '                f"{str(row[0] or \'\').strip()} · {axis[\'name\']}",',
+        '                str(row[0] or "").strip(),',
+    ),
+    (
+        "score: срок платит не вес, а тяжесть",
+        "app/services/site_score.py",
+        "    return URGENT if urgency >= 0.3 else SOON if urgency >= 0.15 else LATER",
+        "    return URGENT if severity >= 1.0 else SOON if urgency >= 0.15 else LATER",
+    ),
+    (
+        "score: всё уехало в «до запуска рекламы»",
+        "app/services/site_score.py",
+        "    return URGENT if urgency >= 0.3 else SOON if urgency >= 0.15 else LATER",
+        "    return URGENT if urgency >= 0 else SOON if urgency >= 0.15 else LATER",
+    ),
+    (
+        "score: ячейка работы обрезана на середине",
+        "app/services/site_score.py",
+        "    return text[:MAX_CELL]",
+        "    return text[:MAX_CELL // 2]",
+    ),
+    (
+        "score: работа названа без причины",
+        "app/services/site_score.py",
+        '    why = verdict.split(" — ", 1)[1].strip() if " — " in verdict else ""',
+        '    why = ""',
+    ),
+    (
+        "score: молчание проверок названо чистым сайтом",
+        "app/services/site_score.py",
+        '    measured = sum(axis["counts"]["measured"] for axis in axes)\n    if not measured:',
+        '    measured = sum(axis["counts"]["measured"] for axis in axes)\n    if False:',
+    ),
+    (
+        "score: очередь без таблиц притворилась посчитанной",
+        "app/services/site_score.py",
+        '    if not any(axis["counts"]["total"] for axis in axes):\n        return {\n            "columns": columns,\n            "rows": [["вне расписания", "Приоритеты не посчитаны",',
+        '    if False:\n        return {\n            "columns": columns,\n            "rows": [["вне расписания", "Приоритеты не посчитаны",',
+    ),
+    (
+        "score: обход вышел из очереди работ",
+        "app/services/site_score.py",
+        "    queue = axes + [axis_of(result, key, name, weight) for key, name, weight in EXTRA_AXES]",
+        "    queue = axes",
+    ),
+    (
+        "score: урезание очереди не названо в пробелах",
+        "app/services/site_score.py",
+        "    if beyond > 0:",
+        "    if beyond < 0:",
+    ),
+    (
+        "score: число урезанных находок потеряно",
+        "app/services/site_score.py",
+        '            f"({beyond}) — в таблицах проверок ниже"',
+        '            "— в таблицах проверок ниже"',
+    ),
+    (
+        "score: отсеянная ось не названа в пробелах",
+        "app/services/site_score.py",
+        '        elif not axis["counted"]:\n            gaps.append(',
+        '        elif False:\n            gaps.append(',
+    ),
+    (
+        "score: оценка по остатку не названа",
+        "app/services/site_score.py",
+        '        elif counts["silent"] > counts["measured"]:',
+        '        elif False:',
+    ),
+    (
+        "score: отсутствующая ось не названа",
+        "app/services/site_score.py",
+        '        if not counts["total"]:\n            gaps.append(\n                f"Ось «{axis[\'name\']}» не посчитана: строк этой проверки в отчёте нет"',
+        '        if False:\n            gaps.append(\n                f"Ось «{axis[\'name\']}» не посчитана: строк этой проверки в отчёте нет"',
+    ),
+    (
+        "score: отсутствие таблиц названо посчитанным баллом",
+        "app/services/site_score.py",
+        '            "Кодовых таблиц проверок в отчёте нет: балл сайта и очередь работ "\n            "не посчитаны"',
+        '            "Балл сайта посчитан: проверок в отчёте достаточно"\n            ", очередь работ собрана"',
+    ),
+    (
+        "score: ось названа по числу строк вместо выводов",
+        "app/services/site_score.py",
+        '                f"Ось «{axis[\'name\']}» в балл не вошла: проверок с выводом "',
+        '                f"Ось «{axis[\'name\']}» в балл не вошла: строк таблицы всего "',
+    ),
+    (
+        "analyzer: балл из ответа модели прошёл в отчёт",
+        "app/services/analyzer.py",
+        '        result.pop("site_score", None)\n        result.pop("action_priorities", None)',
+        "        pass",
+    ),
+    (
+        "analyzer: раздел балла выпал из порядка отчёта",
+        "app/services/analyzer.py",
+        '    "site_score",\n    "site_checks",',
+        '    "site_checks",',
+    ),
+    (
+        "analyzer: очередь работ выпала из порядка отчёта",
+        "app/services/analyzer.py",
+        '    "site_speed",\n    "action_priorities",',
+        '    "site_speed",',
+    ),
+    (
+        "analyzer: очередь работ не попала в отчёт",
+        "app/services/analyzer.py",
+        '            result["action_priorities"] = rating["priorities"]',
+        "            pass",
+    ),
+    (
+        "analyzer: балл посчитан по пустому отчёту",
+        "app/services/analyzer.py",
+        '            rating = site_score.assess(result)\n            result["site_score"] = rating["score"]',
+        '            rating = site_score.assess({})\n            result["site_score"] = rating["score"]',
+    ),
+    (
+        "analyzer: пробелы балла не дошли до честного блока",
+        "app/services/analyzer.py",
+        "        if score_caveats:",
+        "        if False:",
+    ),
 ]
 
 
@@ -1984,6 +2289,7 @@ def main():
             "tests/test_site_infra.py",
             "tests/test_site_crawl.py",
             "tests/test_site_speed.py",
+            "tests/test_site_score.py",
         ),
         "app/routers/history.py": ("tests/test_history_pdf_endpoint.py",),
         "app/services/pdf_report.py": ("tests/test_pdf_report.py", "tests/test_site_infra.py"),
@@ -1991,6 +2297,8 @@ def main():
         "app/services/site_infra.py": ("tests/test_site_infra.py",),
         "app/services/site_crawl.py": ("tests/test_site_crawl.py",),
         "app/services/site_speed.py": ("tests/test_site_speed.py",),
+        "app/services/site_score.py": ("tests/test_site_score.py",),
+        "frontend/src/utils/labels.js": ("tests/test_pdf_report.py",),
     }
     survived = []
 
