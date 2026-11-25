@@ -6,6 +6,7 @@ from urllib.parse import urljoin, urlparse, urldefrag
 import requests
 from bs4 import BeautifulSoup
 from typing import List, Dict, Tuple
+from app.services import site_signals
 from app.services.llm_client import LLMClient
 
 
@@ -139,6 +140,7 @@ REPORT_SECTION_ORDER = (
     "key_facts",
     "comparison_table",
     "site_gaps",
+    "site_checks",
     "ad_instructions",
     "keyword_seeds",
     "negative_keywords",
@@ -482,6 +484,17 @@ class SiteAnalyzer:
         return target
 
     @staticmethod
+    def _signals_block(facts: Dict | None) -> str:
+        """Проверки по разметке для промпта.
+
+        Модель не видит исходный HTML и не может сама узнать, стоит ли на сайте
+        счётчик или есть ли форма. Без переданного блока она пишет «проблемы
+        конверсии» общими словами там, где кодом посчитан конкретный дефект.
+        """
+        signals = (facts or {}).get("signals") or {}
+        return site_signals.render_signals(signals) if signals.get("pages") else ""
+
+    @staticmethod
     def _money(value: int) -> str:
         """1200 -> «1 200»: неразрывные пробелы в отчёте читают лучше запятых."""
         return f"{int(value):,}".replace(",", " ")
@@ -618,6 +631,9 @@ class SiteAnalyzer:
 
         start = urlparse(url)
         facts = self.extract_business_facts(html)
+        # Проверки по разметке считаются по тем же страницам, что ушли в текст:
+        # лишних запросов нет, и вывод опирается на прочитанное, а не на «в целом».
+        facts["signals"] = site_signals.scan_page(html)
         sources: List[Dict] = [{
             "id": 1,
             "url": url,
@@ -641,6 +657,9 @@ class SiteAnalyzer:
             if len(extra_content) < MIN_EXTRA_PAGE_CHARS:
                 continue
             self._merge_facts(facts, self.extract_business_facts(extra_html))
+            facts["signals"] = site_signals.merge_signals(
+                facts.get("signals"), site_signals.scan_page(extra_html)
+            )
 
             source_id = len(sources) + 1
             path = urlparse(link).path.rstrip("/") or "/"
@@ -765,6 +784,10 @@ class SiteAnalyzer:
             for r in intermediate_results
         ])
 
+        # Проверки по разметке попадают и в промпт: без них модель описывает
+        # «проблемы конверсии» всеобщими фразами, хотя счётчика на сайте нет.
+        signals_block = self._signals_block(facts)
+
         # Раньше промпт требовал «обязательно включи оригинальный текст сайта»:
         # модель пересказывала меню вместо разбора, а ответ упирался в лимит
         # токенов. Теперь требуются конкретные поля ограниченного размера,
@@ -773,7 +796,8 @@ class SiteAnalyzer:
             "Ты маркетолог. Объедини результаты промежуточного анализа в итоговый "
             "отчёт по сайту. Факты бери только из переданных данных.\n\n"
             f"Результаты анализа:\n{results_str}\n\n"
-            "Ответ строго в JSON со всеми полями:\n"
+            + (f"{signals_block}\n\n" if signals_block else "")
+            + "Ответ строго в JSON со всеми полями:\n"
             "{\n"
             '  "brief_analysis": "краткий анализ сайта: кто продаёт, кому, чем цепляет; до 1500 знаков, markdown-список",\n'
             '  "key_facts": [ {"fact": "короткий проверяемый факт со страницы", "source": N}, ... 5-8 фактов, где N — номер из заголовка «Источник N» ],\n'
@@ -785,6 +809,8 @@ class SiteAnalyzer:
             "Не вставляй в ответ оригинальный текст сайта целиком: максимум одна цитата длиной до 200 знаков. "
             "В rows и columns не переноси текст на новые строки. "
             "Номер источника указывай только тот, который есть в заголовках «Источник N»; своих адресов не выдумывай. "
+            "Если переданы проверки по разметке — опирайся на них: нет счётчика или формы, "
+            "пиши об этом прямо, а не общими словами про воронку. "
             "Если данных нет — честно пиши об этом в data_gaps, не заменяя их догадками. "
             + RUSSIAN_ONLY_RULE
         )
@@ -811,12 +837,14 @@ class SiteAnalyzer:
             for r in intermediate_results
         )
         literal = self.render_business_facts(facts) if facts else ""
+        signals_block = self._signals_block(facts)
+        context = "\n\n".join(block for block in (literal, signals_block) if block)
 
         system_prompt = (
             "Ты рекламный специалист. По результатам анализа сайта собери план кампании. "
             "Фразы должны браться из товаров и услуг этого сайта, а не из общих слов о рекламе.\n\n"
             f"Результаты анализа:\n{results_str}\n\n"
-            + (f"{literal}\n\n" if literal else "")
+            + (f"{context}\n\n" if context else "")
             + "Ответ строго в JSON со всеми полями:\n"
             "{\n"
             '  "ad_instructions": "пошаговая инструкция по запуску кампании; до 1500 знаков, нумерованный список",\n'
@@ -831,6 +859,8 @@ class SiteAnalyzer:
             "Держись в лимитах знаков: Яндекс Директ — заголовок 56, текст 81; Google Ads — 30 и 90; "
             "VK Реклама — 40 и 90; Telegram Ads — один текст до 160 знаков, заголовка там нет. "
             "Пробелы, знаки препинания и цифры считаются; одно слово в заголовке — не длиннее 22 знаков. "
+            "Если переданы проверки по разметке — инструкция по запуску обязана их учитывать: "
+            "нет форм, значит заявка приходит по телефону, и это отдельная настройка кампании. "
             + RUSSIAN_ONLY_RULE
         )
 
@@ -853,6 +883,8 @@ class SiteAnalyzer:
         """
         facts = facts or {}
         literal = self.render_business_facts(facts)
+        signals_block = self._signals_block(facts)
+        context = "\n\n".join(block for block in (literal, signals_block) if block)
         results_str = "\n\n".join(
             f"Шаг {r['step_number']}: {r['step']}\nРезультат: {self._fit(r['result'], 900)}"
             for r in intermediate_results
@@ -862,7 +894,7 @@ class SiteAnalyzer:
             "Ты медиапланер. Оцени экономику тестовой кампании этого сайта. "
             f"Бюджет теста фиксированный: {self._money(TEST_CAMPAIGN_BUDGET)} ₽ — считать по нему. "
             "Итоги не выводи, их считает код: тебе нужны только допущения.\n\n"
-            f"{literal}\n\n"
+            f"{context}\n\n"
             "Ответ строго в JSON со всеми полями:\n"
             "{\n"
             '  "cpc": цена клика в рублях — число,\n'
@@ -873,6 +905,8 @@ class SiteAnalyzer:
             "}\n"
             "Если на страницах есть цены — avg_check оставь null: средний чек возьмут из них. "
             "Не знаешь значения — ставь null, угаданное число в медиаплане стоит денег. "
+            "Если по проверкам разметки счётчиков или форм нет — конверсию брать неоткуда: "
+            "это допущение, и назови его в notes. "
             + RUSSIAN_ONLY_RULE
         )
 
@@ -1049,7 +1083,9 @@ class SiteAnalyzer:
 
     @classmethod
     def _merge_data_gaps(cls, model_gaps: List[str], facts) -> List[str]:
-        return cls._unique(cls._seed_data_gaps(facts) + list(model_gaps))
+        facts = facts or {}
+        seeded = cls._seed_data_gaps(facts) + site_signals.signal_gaps(facts.get("signals"))
+        return cls._unique(seeded + list(model_gaps))
 
     @staticmethod
     def _order_sections(result: Dict) -> Dict:
@@ -1338,6 +1374,11 @@ class SiteAnalyzer:
             result["data_coverage"] = cls.describe_coverage(sources, facts, MAX_SITE_TEXT_LENGTH)
             if any(facts.get(key) for key in ("phones", "emails", "legal_entities", "requisites", "prices")):
                 result["raw_site_data"] = cls.render_business_facts(facts)
+            # Проверки по разметке — тоже вывод кода: модель не знает, стоит ли
+            # на сайте счётчик, и по её словам это нельзя проверить.
+            checks = site_signals.build_site_checks(facts.get("signals"))
+            if checks["rows"]:
+                result["site_checks"] = checks
 
         for key in ("site_gaps", "risks_and_checks", "data_gaps"):
             values = cls._normalize_string_list(result.get(key))

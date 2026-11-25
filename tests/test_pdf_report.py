@@ -115,6 +115,23 @@ def test_structured_table_value_renders_as_table():
     assert len(tables[0]._cellvalues) == 3
 
 
+def test_markup_checks_get_their_own_chapter():
+    assert pdf_report._label("site_checks").startswith("Проверки по разметке"), (
+        "раздел не должен выходить в PDF как «site checks»"
+    )
+
+    blocks = value_flowables(
+        {
+            "columns": ["Проверка", "Что видно на страницах", "Вывод"],
+            "rows": [["Счётчики и пиксели", "ни одного в разметке", "не найдено — измерять нечем"]],
+        },
+        styles(),
+    )
+    cells = [block for block in blocks if isinstance(block, Table)][0]._cellvalues
+    assert cells[0][0].text == "Проверка"
+    assert cells[1][2].text.startswith("не найдено")
+
+
 def test_site_content_cannot_inject_markup_into_the_pdf():
     assert inline_markup("<script>alert(1)</script>") == "&lt;script&gt;alert(1)&lt;/script&gt;"
     assert "<script>" not in inline_markup('<b onclick="x">жирный</b>')

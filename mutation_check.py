@@ -7,14 +7,18 @@
 адрес источника, телефон в восьми форматах, каталог вместо контактов,
 семантика без потолка и пересечения с минус-словами, объявление длиннее
 лимита площадки, средний чек из догадки вместо цен сайта.
+Дальше — проверки по разметке: счётчик, найденный по слову о нём, охват
+«стоит на половине страниц», вывод там, где читать было нечего.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path("/home/mirash/site-analyzer")
 PY = "/home/mirash/.venvs/sa/bin/python"
+LOCK = Path("/tmp/site-analyzer-mutation.lock")
 
 MUTATIONS = [
     (
@@ -129,8 +133,8 @@ MUTATIONS = [
     (
         "analyzer: честный блок отдаёт на откуп модели",
         "app/services/analyzer.py",
-        "        return cls._unique(cls._seed_data_gaps(facts) + list(model_gaps))",
-        "        return cls._unique(list(model_gaps))",
+        '        seeded = cls._seed_data_gaps(facts) + site_signals.signal_gaps(facts.get("signals"))',
+        "        seeded = []",
     ),
     (
         "analyzer: порядок разделов — как его дала модель",
@@ -247,28 +251,162 @@ MUTATIONS = [
         "    text = INLINE_TRIPLE.sub(lambda m: f\"<b><i>{m.group('text')}</i></b>\", text)",
         "    text = INLINE_TRIPLE.sub(lambda m: f\"<b><i>{m.group('text')}</b></i>\", text)",
     ),
+    # --- Проверки по разметке: код обязан считать, а не предполагать -----
+    (
+        "signals: пустой ответ засчитан как прочитанная страница",
+        "app/services/site_signals.py",
+        "    if not raw.strip():",
+        "    if False:",
+    ),
+    (
+        "signals: незагруженный сайт получил бы таблицу выводов",
+        "app/services/site_signals.py",
+        "    if not pages:\n        # Читать было нечего: любая строка ниже была бы утверждением о сайте,",
+        "    if False:\n        # Читать было нечего: любая строка ниже была бы утверждением о сайте,",
+    ),
+    (
+        "signals: название счётчика в тексте считается за установленный",
+        "app/services/site_signals.py",
+        "        return any(re.search(pattern, raw, re.I) for pattern in matches)",
+        "        return True",
+    ),
+    (
+        "signals: слияние страниц не складывает проверки",
+        "app/services/site_signals.py",
+        "        target[key] = int(target.get(key, 0)) + int(addition.get(key, 0))",
+        "        target[key] = max(int(target.get(key, 0)), int(addition.get(key, 0)))",
+    ),
+    (
+        "signals: охват счётчика свёрнут в голое «найдены: имя»",
+        "app/services/site_signals.py",
+        '        parts.append(f"{name} — на {count} из {pages}" if per_page and count < pages else name)',
+        "        parts.append(name)",
+    ),
+    (
+        "signals: два H1 на странице перестали быть дефектом",
+        "app/services/site_signals.py",
+        '    h1_seen = f"без H1: {h1_missing}, с двумя и больше: {h1_multiple}"',
+        '    h1_seen = f"без H1: {h1_missing}"',
+    ),
+    (
+        "signals: og-теги приписаны всем прочитанным страницам",
+        "app/services/site_signals.py",
+        '        f"og-теги: {og} из {pages}" if pages else "нет данных",',
+        '        f"og-теги: {pages} из {pages}",',
+    ),
+    (
+        "signals: отсутствие форм перестало быть честным пробелом",
+        "app/services/site_signals.py",
+        '    if not int(signals.get("forms", 0)):\n        gaps.append(NO_FORMS_GAP)',
+        '    if int(signals.get("forms", 0)):\n        gaps.append(NO_FORMS_GAP)',
+    ),
+    (
+        "analyzer: проверки разметки не дошли до итогового промпта",
+        "app/services/analyzer.py",
+        r'            + (f"{signals_block}\n\n" if signals_block else "")',
+        '            + ""',
+    ),
+    (
+        "analyzer: план кампании не видит проверок по разметке",
+        "app/services/analyzer.py",
+        '        literal = self.render_business_facts(facts) if facts else ""\n'
+        "        signals_block = self._signals_block(facts)",
+        '        literal = self.render_business_facts(facts) if facts else ""',
+    ),
+    (
+        "analyzer: экономика не видит проверок по разметке",
+        "app/services/analyzer.py",
+        "        literal = self.render_business_facts(facts)\n"
+        "        signals_block = self._signals_block(facts)",
+        "        literal = self.render_business_facts(facts)",
+    ),
+    (
+        "analyzer: пробелы из проверок теряются в data_gaps",
+        "app/services/analyzer.py",
+        "        seeded = cls._seed_data_gaps(facts) + site_signals.signal_gaps(facts.get(\"signals\"))",
+        "        seeded = cls._seed_data_gaps(facts)",
+    ),
+    (
+        "analyzer: раздел проверок не попадает в отчёт",
+        "app/services/analyzer.py",
+        '            checks = site_signals.build_site_checks(facts.get("signals"))\n'
+        '            if checks["rows"]:',
+        '            checks = site_signals.build_site_checks(facts.get("signals"))\n'
+        "            if False:",
+    ),
+    (
+        "analyzer: внутренние страницы не проверяются по разметке",
+        "app/services/analyzer.py",
+        '            facts["signals"] = site_signals.merge_signals(\n'
+        "                facts.get(\"signals\"), site_signals.scan_page(extra_html)\n"
+        "            )",
+        '            facts["signals"] = facts.get("signals") or site_signals.empty_signals()',
+    ),
+    (
+        "analyzer: раздел проверок выпал из порядка чтения",
+        "app/services/analyzer.py",
+        '    "site_gaps",\n    "site_checks",\n',
+        '    "site_gaps",\n',
+    ),
+    (
+        "pdf: раздел проверок вышел в PDF сырым ключом",
+        "app/services/pdf_report.py",
+        '        "site_checks": "Проверки по разметке сайта (посчитано кодом)",',
+        "",
+    ),
 ]
 
 
 def run_suite(target):
     proc = subprocess.run(
-        [PY, "-m", "pytest", target, "-q", "-x", "--no-header", "-p", "no:warnings"],
+        [PY, "-m", "pytest", *target, "-q", "-x", "--no-header", "-p", "no:warnings"],
         cwd=ROOT, capture_output=True, text=True,
     )
     return proc.returncode, proc.stdout
 
 
+def acquire_lock() -> None:
+    """Два параллельных прогона правят один файл и портят друг друга.
+
+    Проверка на деле оставляла в рабочем дереве analyzer.py с уже применённой
+    мутацией: снапшот, сделанный вторым прогоном, был испорчен, и весь отчёт
+    показывал «пойманы» там, где падали посторонние тесты.
+    """
+    if LOCK.exists():
+        try:
+            pid = int(LOCK.read_text().strip() or "0")
+            os.kill(pid, 0)
+        except (ValueError, ProcessLookupError):
+            LOCK.unlink(missing_ok=True)  # след от убитого прошлого прогона
+        except PermissionError:
+            pass
+        else:
+            raise SystemExit(f"уже идёт проверка мутаций (pid {pid}) — дождитесь конца")
+    LOCK.write_text(str(os.getpid()))
+
+
 def main():
     targets = {
-        "app/services/analyzer.py": "tests/test_analyzer_input.py",
-        "app/routers/history.py": "tests/test_history_pdf_endpoint.py",
-        "app/services/pdf_report.py": "tests/test_pdf_report.py",
+        "app/services/analyzer.py": ("tests/test_analyzer_input.py", "tests/test_site_signals.py"),
+        "app/routers/history.py": ("tests/test_history_pdf_endpoint.py",),
+        "app/services/pdf_report.py": ("tests/test_pdf_report.py",),
+        "app/services/site_signals.py": ("tests/test_site_signals.py",),
     }
     survived = []
 
+    # Снапшоты читаются до первой правки: файл, испорченный прошлым прогоном,
+    # дал бы «пойманы» на каждой мутации и ни одного настоящего доказательства.
+    snapshots = {rel: (ROOT / rel).read_text(encoding="utf-8") for _, rel, _, _ in MUTATIONS}
+    for rel in targets:
+        if rel not in snapshots:
+            raise SystemExit(f"{rel}: ни одной мутации — проверка не нужна, а цель остаётся")
+
+    if run_suite(("tests",))[0] != 0:
+        raise SystemExit("тесты падают до всяких мутаций — сначала зелёный набор")
+
     for name, rel, old, new in MUTATIONS:
         path = ROOT / rel
-        original = path.read_text(encoding="utf-8")
+        original = snapshots[rel]
         if original.count(old) != 1:
             print(f"ПРОПУСК  {name}: якорь встречается {original.count(old)} раз")
             survived.append(f"{name} (якорь не найден однозначно)")
@@ -288,15 +426,23 @@ def main():
             print(f"ВЫЖИЛА   {name}")
             survived.append(name)
 
+    broken = [rel for rel, text in snapshots.items() if (ROOT / rel).read_text(encoding="utf-8") != text]
+    for rel in broken:
+        (ROOT / rel).write_text(snapshots[rel], encoding="utf-8")
+    LOCK.unlink(missing_ok=True)
+
     print("\n---")
+    if broken:
+        print("Файлы вернули из снапшотов (прогон был прерван на правке): " + ", ".join(broken))
     if survived:
         print(f"Мутации без падения тестов: {len(survived)}")
         for item in survived:
             print(f"  - {item}")
         return 1
-    print("Все мутации пойманы тестами.")
+    print(f"Все {len(MUTATIONS)} мутаций пойманы тестами.")
     return 0
 
 
 if __name__ == "__main__":
+    acquire_lock()
     sys.exit(main())
